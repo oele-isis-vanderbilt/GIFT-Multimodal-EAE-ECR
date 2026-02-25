@@ -1,0 +1,42 @@
+name: gift-meae
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.8
+  - git
+  - pip
+
+  # core scientific stack (conda)
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - scikit-image
+  - matplotlib
+  - tqdm
+
+  # Video and Image Processing
+  - opencv
+
+  # GUI
+  - pyqt=5
+
+  # pytorch (CPU by default; install CUDA build separately on Windows if needed)
+  - pytorch
+  - torchvision
+
+  - pip:
+    - openmim
+    - imutils
+    - filterpy
+    - dtw
+    - shapely
+    - loguru
+    - lap
+    - gdown
+    - ftfy
+    - regex
