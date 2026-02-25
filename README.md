@@ -128,7 +128,7 @@ Change it to the following (exactly):
 ```python
 inds = ext_module.nms(
             bboxes.cpu(), scores.cpu(), iou_threshold=float(iou_threshold), offset=offset)
-inds = inds.to(bboxes.device)
+inds.to(bboxes.device)
 ```
 
 - If the traceback shows a **different op**, apply the similar pattern.
