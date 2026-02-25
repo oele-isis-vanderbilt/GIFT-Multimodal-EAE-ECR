@@ -35,8 +35,8 @@ Install either **Anaconda** or **Miniconda**:
 ### Step 1 — Clone the repository
 
 ```bash
-git clone <repo-url>
-cd <repo-folder>
+git clone https://github.com/Surya-Rayala/GIFT-Multimodal-EAE-ECR.git
+cd GIFT-Multimodal-EAE-ECR
 ```
 
 ---
