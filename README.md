@@ -225,13 +225,11 @@ You do this by:
 
 ### How to open
 
-From the repo root (with your environment activated):
-
 ```bash
-python scaled_point_mapper_app.py
+python -m src.utils.scaled_point_mapper_app
 ```
 
-> If your file name/path is different in your local copy, run the script that contains `APP_NAME = "scaled_point_mapper"`.
+(Like the other GUI tools in this repo, it’s launched as a module; only the module name is different.)
 
 ### Basic workflow
 
