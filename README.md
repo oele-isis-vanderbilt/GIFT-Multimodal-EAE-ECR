@@ -7,6 +7,7 @@ GIFT Multimodal EAE is a Python-based integration engine for processing session 
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Mapper tool](#mapper-tool-generate-mapping--polygons-for-config)
+- [Scaled Point Mapper tool](#scaled-point-mapper-tool-place-points-using-real-world-distances)
 - [Config Builder tool](#config-builder-tool-create-configjson)
 - [Usage](#usage)
 - [Vmeta format](#vmetaxml-format)
@@ -207,6 +208,66 @@ python -m src.utils.mapper_app
 - `*_room_boundary.txt` → used to populate `Boundary`
 
 
+
+
+## Scaled Point Mapper tool (place points using real-world distances)
+
+This repository also includes a small GUI tool that helps you place **accurate points on a map** when you only know their **real-world distances** to two **adjacent walls**.
+
+### What it’s for (in plain English)
+
+If you can measure (in the real room) how far something is from two walls that meet at a corner (for example: a table corner, a camera tripod spot, a POD location), this tool will place that point on the map image **in the correct spot**.
+
+You do this by:
+
+1) drawing the two walls on the map image, and
+2) entering the real measurements.
+
+### How to open
+
+From the repo root (with your environment activated):
+
+```bash
+python scaled_point_mapper_app.py
+```
+
+> If your file name/path is different in your local copy, run the script that contains `APP_NAME = "scaled_point_mapper"`.
+
+### Basic workflow
+
+1) **Load Map Image**
+   - Click **Load Map Image** and choose the same map image you use in your scenario (`MapPath`).
+
+2) **Add Walls (draw the walls on the map)**
+   - Click **Add Walls**.
+   - Click two points on the map to create one wall segment.
+   - Keep adding wall segments until you have the **two walls that meet at the corner** near your target point.
+   - Tip: existing wall endpoints show as small dots — click a dot to reuse an endpoint exactly (this keeps corners clean).
+
+3) **Add Scaled Point (place a point using measurements)**
+   - Click **Add Scaled Point**.
+   - Select the first wall (click the wall line), then click **Mark Selected Wall as A**.
+   - Select the second wall (must share the corner with A), then click **Mark Selected Wall as B**.
+   - Enter:
+     - **Wall A real length** (real-world length of wall A)
+     - **Wall B real length** (real-world length of wall B)
+     - **Distance to Wall B (along A)** (how far from the corner you travel *along wall A* before reaching the perpendicular distance to wall B)
+     - **Distance to Wall A (along B)** (how far from the corner you travel *along wall B* before reaching the perpendicular distance to wall A)
+   - Click **Add Point**.
+
+4) **Repeat for more points (optional)**
+   - Add as many points as you need. Points remain visible even if you switch back to wall mode.
+
+5) **Save Output Image (Points Only)**
+   - Click **Save Output Image (Points Only)**.
+   - This saves a copy of the map image with **only the points drawn** (no walls). This is useful as a visual reference.
+
+### Notes / tips
+
+- **Keep units consistent.** You can use feet, meters, inches, etc — just use the **same units everywhere** for wall lengths and distances.
+- **Walls must be adjacent.** Wall A and Wall B must share a corner endpoint.
+- **Walls are just helpers.** The engine/config does not consume the wall lines; they are only used to compute point placement.
+- If a computed point would land outside the map image, the tool clamps it to the image boundary.
 
 ## Config Builder tool
 
