@@ -70,6 +70,31 @@ On **macOS**, the project typically works without this step.
 
 ---
 
+
+### CUDA + PyTorch (GPU machines only)
+
+If you are using a **CUDA-enabled** machine, the supported **CUDA Toolkit** versions are:
+
+- **11.8**
+- **12.1**
+- **12.4**
+
+This step is **only needed on CUDA-enabled devices**.
+
+**Uninstall any existing PyTorch packages** in this environment:
+
+```bash
+pip uninstall -y torch torchvision
+```
+
+Next, install **PyTorch** by following the official instructions here (choose the build that matches your CUDA Toolkit version):
+
+- https://pytorch.org/get-started/locally/
+
+Once PyTorch is installed, continue with the `mim` installs below.
+
+---
+
 ### Step 4 — Install the OpenMMLab libraries (one-time setup)
 
 With the environment active, install the OpenMMLab stack using `mim` (provided by the `openmim` package in the environment).
