@@ -17,7 +17,9 @@ GIFT Multimodal EAE is a Python-based integration engine for processing session 
 
 ## Requirements
 
-- **Conda** (Anaconda or Miniconda)
+- **Conda (recent version)** — Anaconda, Miniconda, **or** Miniforge
+  - Use a **newer Conda** to avoid long hangs at `Solving environment`.
+  - Recommended baseline: **conda >= 24.x**.
 
 > All required environment details are specified in `environment.yml`. If you need additional packages, add them to `environment.yml` so the environment remains reproducible.
 
@@ -29,6 +31,7 @@ Install either **Anaconda** or **Miniconda**:
 
 - Anaconda: https://www.anaconda.com/products/individual
 - Miniconda: https://docs.conda.io/en/latest/miniconda.html
+- Miniforge (recommended): https://github.com/conda-forge/miniforge
 
 ---
 
@@ -48,6 +51,15 @@ Create the environment from `environment.yml`:
 ```bash
 conda env create -f environment.yml
 ```
+
+> If environment creation hangs for a long time at **Solving environment**, cancel it (Ctrl+C), enable the faster solver, then re-run **Step 2**:
+>
+> ```bash
+> conda update -n base -c defaults conda -y
+> conda install -n base conda-libmamba-solver -y
+> conda config --set solver libmamba
+> ```
+
 
 ---
 
@@ -86,9 +98,14 @@ This step is **only needed on CUDA-enabled devices**.
 pip uninstall -y torch torchvision
 ```
 
-Next, install **PyTorch** by following the official instructions here (choose the build that matches your CUDA Toolkit version):
+Next, install compatible **PyTorch**:
 
-- https://pytorch.org/get-started/locally/
+# CUDA 11.8
+conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1  pytorch-cuda=11.8 -c pytorch -c nvidia
+# CUDA 12.1
+conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+# CUDA 12.4
+conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.4 -c pytorch -c nvidia
 
 Once PyTorch is installed, continue with the `mim` installs below.
 
