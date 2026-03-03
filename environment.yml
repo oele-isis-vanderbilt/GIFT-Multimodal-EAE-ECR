@@ -7,9 +7,6 @@ channels:
   - defaults
 
 
-channel_priority: strict
-
-
 dependencies:
   - python=3.8
   - git

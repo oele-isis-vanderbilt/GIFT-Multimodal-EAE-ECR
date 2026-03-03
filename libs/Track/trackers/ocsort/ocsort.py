@@ -682,6 +682,12 @@ class OCSort(BaseTracker):
                     if map_xy.size >= 2 and np.isfinite(map_xy[:2]).all():
                         map_point = geo.Point(float(map_xy[0]), float(map_xy[1]))
 
+                # If the point is inside an entry polygon (door/entry zone), do NOT classify it as the pre-existing enemy.
+                # This prevents door entrants from being incorrectly assigned ENEMY_FINAL_ID.
+                in_entry = False
+                if (map_point is not None) and self.entry_polys:
+                    in_entry = any(poly.contains(map_point) for poly in self.entry_polys)
+
                 # enemy handling
                 if (
                     self.track_enemy
@@ -690,6 +696,7 @@ class OCSort(BaseTracker):
                     and (map_point is not None)
                     and (self.boundary_padded is not None)
                     and self.boundary_padded.contains(map_point)
+                    and (not in_entry)
                 ):
                     trk = KalmanBoxTracker(
                         dets[i, :5],

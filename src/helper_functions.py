@@ -545,7 +545,7 @@ def annotate_map_video(map_image: np.ndarray,
             else:
                 color = track_colors.setdefault(tid, predefined_colors[tid % len(predefined_colors)])
             # draw current position
-            cv2.circle(temp_vis, (int(mx), int(my)), 8, color, -1)
+            _draw_point_with_border(temp_vis, (int(mx), int(my)), 8, color)
             # draw trajectory
             # find previous positions
             traj = [(px, py) for f, t, px, py in all_map_points if t == tid and f <= frame_num]
@@ -689,7 +689,7 @@ def annotate_map_pod_video(
                 clr = (255, 255, 255)
             else:
                 clr = track_colors.setdefault(tid, predefined_colors[tid % len(predefined_colors)])
-            cv2.circle(vis, (int(mx), int(my)), 6, clr, -1)
+            _draw_point_with_border(vis, (int(mx), int(my)), 6, clr)
 
         writer.write(vis)
 
@@ -825,7 +825,7 @@ def annotate_map_pod_with_paths_video(
             clr = (255, 255, 255) if tid in enemy_ids else track_colors.setdefault(
                 tid, predefined_colors[tid % len(predefined_colors)]
             )
-            cv2.circle(vis, (int(mx), int(my)), 6, clr, -1)
+            _draw_point_with_border(vis, (int(mx), int(my)), 6, clr)
 
         # --- Update the permanent trail canvas with trajectory lines up to this frame ---
         for tid in {t for _, t, _, _ in all_map_points}:
@@ -965,6 +965,20 @@ def _draw_dotted_polygon(img: np.ndarray, pts: np.ndarray, color: Tuple[int, int
             seg_start = tuple(seg_start.astype(int))
             seg_end = tuple(seg_end.astype(int))
             _cv.line(img, seg_start, seg_end, color, thickness)
+            
+def _draw_point_with_border(
+    img: np.ndarray,
+    center: Tuple[int, int],
+    radius: int,
+    fill_color: Tuple[int, int, int],
+    border_color: Tuple[int, int, int] = (0, 0, 0),
+    border_thickness: int = 2,
+) -> None:
+    """Draw a filled point with a contrasting border for visibility."""
+    # Border first (slightly larger), then the filled point.
+    if border_thickness > 0:
+        cv2.circle(img, center, radius + border_thickness, border_color, -1)
+    cv2.circle(img, center, radius, fill_color, -1)
 
 
 def _has_valid_run(

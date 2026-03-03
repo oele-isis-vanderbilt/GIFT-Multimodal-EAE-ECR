@@ -10,7 +10,7 @@ Features
 - Root folder picker: used for saving config.json and for storing relative paths when possible
 
 IMPORTANT:
-- POD, Boundary, MapPath, point_mapping_path, entry_polys_path are REQUIRED and start empty.
+- Boundary, MapPath, point_mapping_path, entry_polys_path are REQUIRED and start empty. (POD is optional and may be empty.)
 - Save is disabled until all required items + project root are selected.
 """
 
@@ -734,12 +734,17 @@ class ConfigBuilderWindow(QMainWindow):
         self.btn_save = QPushButton("Save config.json…")
         self.btn_save.clicked.connect(self.save_config)
         self.btn_save.setEnabled(False)  # enabled only when required fields are ready
+        
+        self.btn_reset = QPushButton("New / Reset")
+        self.btn_reset.setToolTip("Reset all fields to start a new config")
+        self.btn_reset.clicked.connect(self.reset_config)
 
         top.addWidget(QLabel("Project Root:"))
         top.addWidget(self.root_path, 1)
         top.addWidget(self.btn_root)
         top.addSpacing(10)
         top.addWidget(self.btn_load)
+        top.addWidget(self.btn_reset)
         top.addWidget(self.btn_save)
 
         # Tabs
@@ -790,10 +795,6 @@ class ConfigBuilderWindow(QMainWindow):
         if not self.model.project_root:
             QMessageBox.warning(self, "Missing Root", "Please set a Project Root folder first.")
             return
-
-        if len(self.model.data.get("POD", [])) < 1:
-            QMessageBox.warning(self, "Invalid POD", "POD list is empty. Load a POD file.")
-            return
         if len(self.model.data.get("Boundary", [])) < 3:
             QMessageBox.warning(self, "Invalid Boundary", "Boundary must have at least 3 points.")
             return
@@ -819,6 +820,30 @@ class ConfigBuilderWindow(QMainWindow):
             QMessageBox.information(self, "Saved", f"Saved config to:\n{fp}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Failed to save config:\n\n{e}")
+            
+    def reset_config(self):
+        # Preserve project root (so you can keep saving into the same project)
+        keep_root = self.model.project_root
+
+        # Reset model to defaults
+        self.model.data = json.loads(json.dumps(DEFAULT_CONFIG))
+        self.model._normalize()
+        self.model.project_root = keep_root
+
+        # Clear POD file source path so drags don't rewrite an old file
+        self._pod_points_src_path = ""
+
+        # Clear visible file picker paths
+        self.pod_file_picker.set_path("")
+        self.boundary_file_picker.set_path("")
+        self.map_picker.set_path("")
+        self.point_map_picker.set_path("")
+        self.entry_polys_picker.set_path("")
+
+        # Rebuild UI from model defaults
+        self.refresh_all()
+        self._update_ready_state()
+        self.statusBar().showMessage("Reset to defaults. Select required inputs to save.")
 
     # ---------- Readiness state ----------
 
@@ -830,19 +855,17 @@ class ConfigBuilderWindow(QMainWindow):
         pm_ok = bool(self.model.data.get("point_mapping_path", ""))
         ep_ok = bool(self.model.data.get("entry_polys_path", ""))
 
-        self.pod_file_picker.set_required_missing(not has_pod)
+        self.pod_file_picker.set_required_missing(False)
         self.boundary_file_picker.set_required_missing(not has_boundary)
         self.map_picker.set_required_missing(not map_ok)
         self.point_map_picker.set_required_missing(not pm_ok)
         self.entry_polys_picker.set_required_missing(not ep_ok)
 
-        ready = has_pod and has_boundary and map_ok and pm_ok and ep_ok and bool(self.model.project_root)
+        ready = has_boundary and map_ok and pm_ok and ep_ok and bool(self.model.project_root)
         self.btn_save.setEnabled(ready)
 
         if not self.model.project_root:
             msg = "Set Project Root to enable saving."
-        elif not has_pod:
-            msg = "Load POD points file (*.txt)."
         elif not has_boundary:
             msg = "Load Boundary file (*.txt)."
         elif not map_ok:
@@ -884,7 +907,7 @@ class ConfigBuilderWindow(QMainWindow):
             "POD points file:",
             self.pick_pod_points,
             filter_str="Text Files (*.txt);;All Files (*)",
-            required=True
+            required=False
         )
         core_form.addWidget(self.pod_file_picker)
 
