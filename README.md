@@ -100,11 +100,11 @@ pip uninstall -y torch torchvision
 
 Next, install compatible **PyTorch**:
 
-# CUDA 11.8
+#### CUDA 11.8
 conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1  pytorch-cuda=11.8 -c pytorch -c nvidia
-# CUDA 12.1
+#### CUDA 12.1
 conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1 -c pytorch -c nvidia
-# CUDA 12.4
+#### CUDA 12.4
 conda install pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.4 -c pytorch -c nvidia
 
 Once PyTorch is installed, continue with the `mim` installs below.
