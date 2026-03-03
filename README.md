@@ -17,7 +17,6 @@ GIFT Multimodal EAE is a Python-based integration engine for processing session 
 
 ## Requirements
 
-- **Python 3.10**
 - **Conda** (Anaconda or Miniconda)
 
 > All required environment details are specified in `environment.yml`. If you need additional packages, add them to `environment.yml` so the environment remains reproducible.
