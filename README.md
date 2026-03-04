@@ -93,15 +93,7 @@ This step is **only needed on CUDA-enabled devices**.
 pip uninstall -y torch torchvision torchaudio
 ```
 
-Next, install compatible **PyTorch (CUDA 12.1)** using **either** Conda **or** Pip:
-
-**Option A — Conda (recommended)**
-
-```bash
-conda install pytorch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-```
-
-**Option B — Pip (CUDA 12.1 wheels)**
+Next, install compatible **PyTorch (CUDA 12.1)** using Pip:
 
 ```bash
 pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
