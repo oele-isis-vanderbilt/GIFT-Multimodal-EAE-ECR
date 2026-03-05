@@ -9,6 +9,50 @@ from shapely.ops import nearest_points
 from shapely.errors import GEOSException
 
 # ----------------------------------------------------------------------
+# Frame source helpers: stream frames from a video file.
+# ----------------------------------------------------------------------
+
+def _open_video_capture(video_path: str) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Unable to open video_path: {video_path}")
+    return cap
+
+
+def _get_frame_stream(video_path: str):
+    """Return (cap, get_frame_fn) where get_frame_fn(frame_idx_1based) -> frame|None.
+
+    Frames are read sequentially and advanced until the requested 1-based frame index.
+    """
+    if not video_path:
+        raise ValueError("video_path must be set for streaming frame access.")
+
+    cap = _open_video_capture(video_path)
+    # cur: last frame index read (1-based). last: last frame image read.
+    state = {"cur": 0, "last": None}
+
+    def _get(frame_idx_1based: int):
+        if frame_idx_1based <= 0:
+            return None
+
+        # If caller requests a frame we've already read (common when we probe
+        # the first frame to get resolution, then request it again in the loop),
+        # return the cached frame.
+        if frame_idx_1based <= state["cur"]:
+            return state["last"]
+
+        while state["cur"] < frame_idx_1based:
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                return None
+            state["cur"] += 1
+            state["last"] = fr
+
+        return state["last"]
+
+    return cap, _get
+
+# ----------------------------------------------------------------------
 # PixelMapper safety helpers (new robust mapper may return NaNs or shapes like (1,2))
 # ----------------------------------------------------------------------
 
@@ -194,13 +238,14 @@ def compute_gaze_vector(keypoints: np.ndarray) -> Optional[Tuple[np.ndarray, np.
 
 
 
-def annotate_camera_video(raw_frames: List[np.ndarray],
-                          tracker_output: List[Dict],
+def annotate_camera_video(tracker_output: List[Dict],
                           frame_rate: int,
                           output_directory: str,
                           video_basename: str,
                           enemy_ids: List[int] = None,
-                          gaze_conf_threshold: float = 0.3):
+                          gaze_conf_threshold: float = 0.3,
+                          *,
+                          video_path: Optional[str] = None):
     # Define skeleton connections (pairs of keypoint indices)
     skeleton = [
         (15, 13), (13, 11), (11, 19),
@@ -216,7 +261,6 @@ def annotate_camera_video(raw_frames: List[np.ndarray],
     ]
     """
     Generate the annotated camera video.
-    - raw_frames: list of original video frames (np.ndarray), indexed by frame number starting at 1
     - tracker_output: list of dicts {'frame': int, 'objects': [{'id', 'bbox', 'keypoints', 'keypoint_scores'}]}
     - fall_frame: frame index at which the enemy is considered fallen
     - frame_rate: frames per second for output video
@@ -234,11 +278,21 @@ def annotate_camera_video(raw_frames: List[np.ndarray],
     ]
     track_colors: Dict[int, Tuple[int, int, int]] = {}
 
+    # Prepare frame source (streaming from video_path)
+    cap, get_frame = _get_frame_stream(video_path)
+
     # Prepare output writer
-    video_path = os.path.join(output_directory, f"{video_basename}_Tracking_Overlays.mp4")
-    height, width = raw_frames[0].shape[:2]
+    out_path = os.path.join(output_directory, f"{video_basename}_Tracking_Overlays.mp4")
+    # Determine output resolution from the first frame we can fetch
+    first_idx = tracker_output[0]["frame"] if tracker_output else 1
+    first_frame = get_frame(first_idx)
+    if first_frame is None:
+        if cap is not None:
+            cap.release()
+        raise ValueError("Unable to read first frame for annotate_camera_video")
+    height, width = first_frame.shape[:2]
     writer = cv2.VideoWriter(
-        video_path,
+        out_path,
         cv2.VideoWriter_fourcc(*"avc1"),
         frame_rate,
         (width, height)
@@ -248,8 +302,10 @@ def annotate_camera_video(raw_frames: List[np.ndarray],
         enemy_ids = [99]
     # Iterate frames and overlay annotations
     for frame_data in tracker_output:
-        idx = frame_data["frame"] - 1
-        frame = raw_frames[idx].copy()
+        frame = get_frame(frame_data["frame"])
+        if frame is None:
+            break
+        frame = frame.copy()
         for obj in frame_data["objects"]:
             trk_id = obj["id"]
             x1, y1, x2, y2 = obj["bbox"]
@@ -294,10 +350,11 @@ def annotate_camera_video(raw_frames: List[np.ndarray],
         writer.write(frame)
 
     writer.release()
+    if cap is not None:
+        cap.release()
 
 
-def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
-                                       tracker_output: List[Dict],
+def annotate_camera_with_gaze_triangle(tracker_output: List[Dict],
                                        gaze_info: Dict[Tuple[int, int], Tuple[float, float, float, float]],
                                        frame_rate: int,
                                        output_directory: str,
@@ -305,10 +362,11 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
                                        enemy_ids: List[int] = None,
                                        half_angle_deg: float = 30.0,
                                        alpha: float = 0.2,
-                                       show_enemy_gaze: bool = True):
+                                       show_enemy_gaze: bool = True,
+                                       *,
+                                       video_path: Optional[str] = None):
     """
     Generate the annotated camera video with bounding boxes, skeletons, and semi-transparent gaze triangles.
-    - raw_frames: list of original video frames (np.ndarray), indexed by frame number starting at 1
     - tracker_output: list of dicts {'frame': int, 'objects': [{'id', 'bbox', 'keypoints', 'keypoint_scores'}]}
     - gaze_info: dictionary mapping (frame, track_id) to (ox, oy, dx, dy)
     - fall_frame: frame index at which the enemy is considered fallen
@@ -334,11 +392,20 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
     if enemy_ids is None:
         enemy_ids = [99]
 
+    # Prepare frame source (streaming from video_path)
+    cap, get_frame = _get_frame_stream(video_path)
+
     # Prepare output writer
-    video_path = os.path.join(output_directory, f"{video_basename}_Gaze_Triangles.mp4")
-    height, width = raw_frames[0].shape[:2]
+    out_path = os.path.join(output_directory, f"{video_basename}_Gaze_Triangles.mp4")
+    first_idx = tracker_output[0]["frame"] if tracker_output else 1
+    first_frame = get_frame(first_idx)
+    if first_frame is None:
+        if cap is not None:
+            cap.release()
+        raise ValueError("Unable to read first frame for annotate_camera_with_gaze_triangle")
+    height, width = first_frame.shape[:2]
     writer = cv2.VideoWriter(
-        video_path,
+        out_path,
         cv2.VideoWriter_fourcc(*"avc1"),
         frame_rate,
         (width, height)
@@ -350,8 +417,10 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
 
     # Iterate frames and overlay annotations
     for frame_data in tracker_output:
-        idx = frame_data["frame"] - 1
-        frame = raw_frames[idx].copy()
+        frame = get_frame(frame_data["frame"])
+        if frame is None:
+            break
+        frame = frame.copy()
 
         # --- 1. Draw bounding boxes & IDs ---
         for obj in frame_data["objects"]:
@@ -369,7 +438,6 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 3)
 
         # --- 2. Draw each gaze cone on‑the‑fly so overlapping cones mix colours ---
-        overlay = np.zeros_like(frame, dtype=np.uint8)
 
         for obj in frame_data["objects"]:
             trk_id = obj["id"]
@@ -387,7 +455,6 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
 
             ox, oy, dx, dy = gaze
             tri = _gaze_triangle((ox, oy), (dx, dy), half_angle, length=tri_len).astype(int)
-            cv2.fillConvexPoly(overlay, tri, color)
 
             # Create a transparent overlay for this single triangle
             tri_overlay = np.zeros_like(frame, dtype=np.uint8)
@@ -400,19 +467,21 @@ def annotate_camera_with_gaze_triangle(raw_frames: List[np.ndarray],
         writer.write(frame)
 
     writer.release()
+    if cap is not None:
+        cap.release()
     
-def annotate_clearance_video(raw_frames: List[np.ndarray],
-                             tracker_output: List[Dict],
+def annotate_clearance_video(tracker_output: List[Dict],
                              clearance_map: Dict[int, Tuple[Optional[int], Optional[int], Optional[int]]],
                              frame_rate: int,
                              output_directory: str,
                              video_basename: str,
-                             enemy_ids: List[int] = None):
+                             enemy_ids: List[int] = None,
+                             *,
+                             video_path: Optional[str] = None):
     """
     Generate a video showing bounding boxes and IDs, and overlay 'CLEARED!'
     when each enemy’s clearance start frame is reached.
 
-    - raw_frames: list of original video frames (np.ndarray), indexed by frame number starting at 1
     - tracker_output: list of dicts {'frame': int, 'objects': [{'id', 'bbox'}]}
     - clearance_map: dict mapping track_id → (start_frame, end_frame, clearing_friend_id)
                      start_frame is the frame at which track_id is considered 'cleared'
@@ -432,11 +501,20 @@ def annotate_clearance_video(raw_frames: List[np.ndarray],
     ]
     track_colors: Dict[int, Tuple[int, int, int]] = {}
 
+    # Prepare frame source (streaming from video_path)
+    cap, get_frame = _get_frame_stream(video_path)
+
     # Prepare output writer
-    video_path = os.path.join(output_directory, f"{video_basename}_Clearance_Callouts.mp4")
-    height, width = raw_frames[0].shape[:2]
+    out_path = os.path.join(output_directory, f"{video_basename}_Clearance_Callouts.mp4")
+    first_idx = tracker_output[0]["frame"] if tracker_output else 1
+    first_frame = get_frame(first_idx)
+    if first_frame is None:
+        if cap is not None:
+            cap.release()
+        raise ValueError("Unable to read first frame for annotate_clearance_video")
+    height, width = first_frame.shape[:2]
     writer = cv2.VideoWriter(
-        video_path,
+        out_path,
         cv2.VideoWriter_fourcc(*"avc1"),
         frame_rate,
         (width, height)
@@ -444,8 +522,10 @@ def annotate_clearance_video(raw_frames: List[np.ndarray],
 
     # Iterate frames and overlay annotations
     for frame_data in tracker_output:
-        idx = frame_data["frame"] - 1
-        frame = raw_frames[idx].copy()
+        frame = get_frame(frame_data["frame"])
+        if frame is None:
+            break
+        frame = frame.copy()
 
         # First, draw bounding boxes and IDs for all tracks
         for obj in frame_data["objects"]:
@@ -485,6 +565,8 @@ def annotate_clearance_video(raw_frames: List[np.ndarray],
         writer.write(frame)
 
     writer.release()
+    if cap is not None:
+        cap.release()
 
 
 def annotate_map_video(map_image: np.ndarray,
@@ -536,6 +618,9 @@ def annotate_map_video(map_image: np.ndarray,
 
     permanent_vis = map_image.copy()
 
+    # Track last seen position per track for incremental trail drawing.
+    last_pos: Dict[int, Tuple[float, float]] = {}
+
     # Iterate through all frames (including those without tracks) for full-length video
     for frame_num in range(1, max_frame + 1):
         temp_vis = permanent_vis.copy()
@@ -544,17 +629,23 @@ def annotate_map_video(map_image: np.ndarray,
                 color = (255, 255, 255)
             else:
                 color = track_colors.setdefault(tid, predefined_colors[tid % len(predefined_colors)])
+
             # draw current position
             _draw_point_with_border(temp_vis, (int(mx), int(my)), 8, color)
-            # draw trajectory
-            # find previous positions
-            traj = [(px, py) for f, t, px, py in all_map_points if t == tid and f <= frame_num]
+
+            # draw incremental trajectory segment (non-enemy only)
             if tid not in enemy_ids:
-                for p1, p2 in zip(traj, traj[1:]):
-                    cv2.line(permanent_vis,
-                             (int(p1[0]), int(p1[1])),
-                             (int(p2[0]), int(p2[1])),
-                             color, 2)
+                prev = last_pos.get(tid)
+                if prev is not None:
+                    cv2.line(
+                        permanent_vis,
+                        (int(prev[0]), int(prev[1])),
+                        (int(mx), int(my)),
+                        color,
+                        2,
+                    )
+                last_pos[tid] = (mx, my)
+
         writer.write(temp_vis)
 
     writer.release()
@@ -789,7 +880,9 @@ def annotate_map_pod_with_paths_video(
 
     # This canvas will accumulate trajectory lines over time.
     permanent_trails = map_image.copy()
-
+    # Track last seen position per track for incremental trail drawing.
+    last_pos: Dict[int, Tuple[float, float]] = {}
+    
     # Iterate frames
     for frame_idx in range(1, max_frame + 1):
         # Start from the trail canvas accumulated so far
@@ -827,20 +920,21 @@ def annotate_map_pod_with_paths_video(
             )
             _draw_point_with_border(vis, (int(mx), int(my)), 6, clr)
 
-        # --- Update the permanent trail canvas with trajectory lines up to this frame ---
-        for tid in {t for _, t, _, _ in all_map_points}:
+        # --- Incremental trail update for this frame (non-enemy only) ---
+        for tid, mx, my in pts_per_frame.get(frame_idx, []):
             if tid in enemy_ids:
                 continue
-            # Collect the trajectory for this ID up to the current frame
-            traj = [(px, py) for f, t, px, py in all_map_points if t == tid and f <= frame_idx]
-            if len(traj) < 2:
-                continue
+            prev = last_pos.get(tid)
             clr = track_colors.setdefault(tid, predefined_colors[tid % len(predefined_colors)])
-            for p1, p2 in zip(traj, traj[1:]):
-                cv2.line(permanent_trails,
-                         (int(p1[0]), int(p1[1])),
-                         (int(p2[0]), int(p2[1])),
-                         clr, 2)
+            if prev is not None:
+                cv2.line(
+                    permanent_trails,
+                    (int(prev[0]), int(prev[1])),
+                    (int(mx), int(my)),
+                    clr,
+                    2,
+                )
+            last_pos[tid] = (mx, my)
 
         writer.write(vis)
 
@@ -1455,15 +1549,16 @@ def annotate_map_with_gaze(
 # ----------------------------------------------------------------------
 # Combined camera-view: tracking overlays + clearance callouts
 # ----------------------------------------------------------------------
-def annotate_camera_tracking_with_clearance(raw_frames: List[np.ndarray],
-                                            tracker_output: List[Dict],
+def annotate_camera_tracking_with_clearance(tracker_output: List[Dict],
                                             clearance_map: Dict[int, Tuple[Optional[int], Optional[int], Optional[int]]],
                                             frame_rate: int,
                                             output_directory: str,
                                             video_basename: str,
                                             enemy_ids: List[int] = None,
                                             gaze_conf_threshold: float = 0.3,
-                                            show_clearing_id: bool = True):
+                                            show_clearing_id: bool = True,
+                                            *,
+                                            video_path: Optional[str] = None):
     """
     Combined camera-view annotator:
       • Draws tracking overlays (bounding boxes, IDs, and 26‑keypoint skeletons).
@@ -1497,12 +1592,21 @@ def annotate_camera_tracking_with_clearance(raw_frames: List[np.ndarray],
     ]
     track_colors: Dict[int, Tuple[int, int, int]] = {}
 
+    # Prepare frame source (streaming from video_path)
+    cap, get_frame = _get_frame_stream(video_path)
+
     # Prepare writer
     os.makedirs(output_directory, exist_ok=True)
-    video_path = os.path.join(output_directory, f"{video_basename}_Tracking_WithClearance.mp4")
-    height, width = raw_frames[0].shape[:2]
+    out_path = os.path.join(output_directory, f"{video_basename}_Tracking_WithClearance.mp4")
+    first_idx = tracker_output[0]["frame"] if tracker_output else 1
+    first_frame = get_frame(first_idx)
+    if first_frame is None:
+        if cap is not None:
+            cap.release()
+        raise ValueError("Unable to read first frame for annotate_camera_tracking_with_clearance")
+    height, width = first_frame.shape[:2]
     writer = cv2.VideoWriter(
-        video_path,
+        out_path,
         cv2.VideoWriter_fourcc(*"avc1"),
         frame_rate,
         (width, height)
@@ -1510,8 +1614,10 @@ def annotate_camera_tracking_with_clearance(raw_frames: List[np.ndarray],
 
     # Iterate frames
     for frame_data in tracker_output:
-        idx = frame_data["frame"] - 1
-        frame = raw_frames[idx].copy()
+        frame = get_frame(frame_data["frame"])
+        if frame is None:
+            break
+        frame = frame.copy()
 
         # First pass: draw boxes, IDs, and skeletons
         for obj in frame_data["objects"]:
@@ -1572,6 +1678,8 @@ def annotate_camera_tracking_with_clearance(raw_frames: List[np.ndarray],
         writer.write(frame)
 
     writer.release()
+    if cap is not None:
+        cap.release()
 
 
 # --- Room Coverage Analysis and Cache ---

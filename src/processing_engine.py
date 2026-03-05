@@ -264,7 +264,7 @@ class ProcessingEngine:
         # Keep only known visualization names
         enabled = [name for name in enabled if name in VIS_VMETA_SUFFIX]
         self.enabled_visualizations = enabled
-        
+
         # --------------------------------------------------------------
         # Visual angle config: store ONE value in config (full angle).
         # Some downstream functions expect a half-angle; compute it once.
@@ -282,6 +282,7 @@ class ProcessingEngine:
         # Enemy IDs: allow multiple enemies as a list, falling back gracefully
         # ------------------------------------------------------------------
         enemy_ids = config.get("enemy_ids", [getattr(self.tracker, "ENEMY_FINAL_ID", 99)])
+
 
         # Initialize metrics
         metrics: List[AbstractMetric] = [
@@ -311,11 +312,15 @@ class ProcessingEngine:
         logging.debug("Saved map cache to: {}".format(os.path.join(self.output_directory, "EmptyMap.jpg")))
 
         # Collectors
-        raw_frames: List[np.ndarray] = []            # original frames for camera video
         tracker_output: List[dict] = []              # per‑frame serialised tracking info
         all_map_points: List[list] = []              # [frame, id, mapX, mapY]
         gaze_info: Dict[Tuple[int, int], Tuple[float, float, float, float]] = {}  # {(frame, id): (ox, oy, dx, dy)}
         all_frames: List[list] = []  # collect map_points per frame for batch metrics
+        processed_frames = 0  # actual number of frames read/processed
+        # Build trajectories incrementally to avoid O(num_frames * num_ids) post-pass.
+        # tracks_by_id[tid] is a per-frame list of (x, y) or None.
+        from typing import Optional
+        tracks_by_id: Dict[int, List[Optional[Tuple[float, float]]]] = {}
 
         # Begin Processing
         for frame_num in tqdm(range(1, frame_total + 1), desc="Processing frames", unit="frame"):
@@ -323,7 +328,7 @@ class ProcessingEngine:
             if not ret or frame is None:
                 break
 
-            raw_frames.append(frame.copy())
+            processed_frames += 1
 
             # Step 1-3: Run MMPose inferencer to get detections and keypoints
             infer_results = self.inferencer(
@@ -434,6 +439,20 @@ class ProcessingEngine:
                             # The point is outside, project it to the nearest point on the boundary.
                             nearest_point = nearest_points(self.boundary, point)[0]
                             map_points.append([trk_id, nearest_point.x, nearest_point.y])
+            # --- Incremental trajectory update (map space) ---
+            # Append a placeholder for this frame to every existing track
+            for tid in tracks_by_id.keys():
+                tracks_by_id[tid].append(None)
+
+            # Fill in positions for tracks observed in this frame.
+            for tid, mx, my in map_points:
+                if tid not in tracks_by_id:
+                    # Backfill previous frames with None
+                    tracks_by_id[tid] = [None] * (processed_frames - 1)
+                    tracks_by_id[tid].append((float(mx), float(my)))
+                else:
+                    tracks_by_id[tid][-1] = (float(mx), float(my))
+
             all_frames.append(map_points)
             # Save map tracking output
             for idx, mx, my in map_points:
@@ -450,27 +469,27 @@ class ProcessingEngine:
         # --------------------------------------------------------------
         if "annotate_camera_video" in self.enabled_visualizations:
             annotate_camera_video(
-                raw_frames,
-                tracker_output,
-                config["frame_rate"],
-                self.output_directory,
-                self.video_basename,
+                tracker_output=tracker_output,
+                frame_rate=config["frame_rate"],
+                output_directory=self.output_directory,
+                video_basename=self.video_basename,
                 enemy_ids=enemy_ids,
                 gaze_conf_threshold=self.pose_conf_threshold,
+                video_path=config["video_path"],
             )
 
         if "annotate_camera_with_gaze_triangle" in self.enabled_visualizations:
             annotate_camera_with_gaze_triangle(
-                raw_frames,
-                tracker_output,
-                gaze_info,
-                config["frame_rate"],
-                self.output_directory,
-                self.video_basename,
+                tracker_output=tracker_output,
+                gaze_info=gaze_info,
+                frame_rate=config["frame_rate"],
+                output_directory=self.output_directory,
+                video_basename=self.video_basename,
                 enemy_ids=enemy_ids,
                 half_angle_deg=half_visual_angle_deg,
                 alpha=0.2,
                 show_enemy_gaze=False,
+                video_path=config["video_path"],
             )
 
         if "annotate_map_video" in self.enabled_visualizations:
@@ -480,7 +499,7 @@ class ProcessingEngine:
                 config["frame_rate"],
                 self.output_directory,
                 self.video_basename,
-                total_frames=len(raw_frames),
+                total_frames=processed_frames,
                 enemy_ids=enemy_ids,
             )
 
@@ -499,7 +518,7 @@ class ProcessingEngine:
                     show_enemy_gaze=False,
                     half_angle_deg=half_visual_angle_deg,
                     alpha=0.1,
-                    total_frames=len(raw_frames),
+                    total_frames=processed_frames,
                     accumulated_clear=True,
                 )
 
@@ -510,7 +529,7 @@ class ProcessingEngine:
                 gaze_info=gaze_info,
                 room_boundary_coords=list(self.boundary.exterior.coords),
                 frame_rate=config["frame_rate"],
-                total_frames=len(raw_frames),
+                total_frames=processed_frames,
                 enemy_ids=enemy_ids,
                 half_angle_deg=half_visual_angle_deg,
             )
@@ -526,17 +545,7 @@ class ProcessingEngine:
         logging.debug("Saved PositionCache to: {}".format(
             os.path.join(self.output_directory, f"{self.video_basename}_PositionCache.txt")))
 
-        # Batch process metrics using collected frames and tracks
-        # Build tracks_by_id: map each track ID to its full trajectory (or None) per frame
-        all_ids = set()
-        for frame_pts in all_frames:
-            for trk_id, _, _ in frame_pts:
-                all_ids.add(trk_id)
-        tracks_by_id: Dict[int, list] = {tid: [] for tid in all_ids}
-        for frame_pts in all_frames:
-            frame_dict = {tid: (x, y) for tid, x, y in frame_pts}
-            for tid in all_ids:
-                tracks_by_id[tid].append(frame_dict.get(tid))
+        # tracks_by_id has already been built incrementally during frame loop
 
         # ---- POD assignment & capture analysis (wrapper) --------------------
         pods_cfg = config.get("POD", [])
@@ -571,7 +580,7 @@ class ProcessingEngine:
                 frame_rate=config["frame_rate"],
                 output_directory=self.output_directory,
                 video_basename=self.video_basename,
-                total_frames=len(raw_frames),
+                total_frames=processed_frames,
                 enemy_ids=enemy_ids,
             )
 
@@ -585,7 +594,7 @@ class ProcessingEngine:
                 frame_rate=config["frame_rate"],
                 output_directory=self.output_directory,
                 video_basename=self.video_basename,
-                total_frames=len(raw_frames),
+                total_frames=processed_frames,
                 enemy_ids=enemy_ids,
             )
 
@@ -600,7 +609,6 @@ class ProcessingEngine:
                 keypoint_details[(frame_idx, tid)] = (obj["keypoints"], obj["keypoint_scores"])
 
         context = MetricContext(
-            raw_frames=raw_frames,
             tracker_output=tracker_output,
             all_frames=all_frames,
             tracks_by_id=tracks_by_id,
@@ -626,26 +634,26 @@ class ProcessingEngine:
         )
         if "annotate_clearance_video" in self.enabled_visualizations:
             annotate_clearance_video(
-                raw_frames,
-                tracker_output,
-                clearance_map,
-                config["frame_rate"],
-                self.output_directory,
-                self.video_basename,
+                tracker_output=tracker_output,
+                clearance_map=clearance_map,
+                frame_rate=config["frame_rate"],
+                output_directory=self.output_directory,
+                video_basename=self.video_basename,
                 enemy_ids=enemy_ids,
+                video_path=config["video_path"],
             )
 
         if "annotate_camera_tracking_with_clearance" in self.enabled_visualizations:
             annotate_camera_tracking_with_clearance(
-                raw_frames,
-                tracker_output,
-                clearance_map,
-                config["frame_rate"],
-                self.output_directory,
-                self.video_basename,
+                tracker_output=tracker_output,
+                clearance_map=clearance_map,
+                frame_rate=config["frame_rate"],
+                output_directory=self.output_directory,
+                video_basename=self.video_basename,
                 enemy_ids=enemy_ids,
                 gaze_conf_threshold=self.pose_conf_threshold,
                 show_clearing_id=True,
+                video_path=config["video_path"],
             )
         save_threat_clearance_cache(clearance_map, self.output_directory, self.video_basename)
         # Attach to context so metrics can reuse it
