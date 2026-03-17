@@ -2043,8 +2043,8 @@ def assign_pods_by_entry(
     boundary_line = LineString(boundary.exterior.coords)
     door_pt = boundary_line.interpolate(boundary_line.project(entry_pt))
 
-    # Estimate entry-direction vector from a small future window (robust to short tracks)
-    pts_future = [pt for pt in first_trk[idx0 + 1 : idx0 + 61] if pt is not None]
+    # Estimate entry-direction vector from a 120-frame future window (robust to short tracks)
+    pts_future = [pt for pt in first_trk[idx0 + 1 : idx0 + 121] if pt is not None]
     mean_dir = None
     if pts_future:
         mean_vec = np.mean(np.array(pts_future, dtype=float), axis=0) - np.array(entry_xy, dtype=float)

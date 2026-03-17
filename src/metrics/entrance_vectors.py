@@ -32,7 +32,7 @@ class EntranceVectors_Metric(AbstractMetric):
 
     def getFinalScore(self) -> float:
         # Analyze the first k valid points per track to infer entrance side (+1 / -1)
-        k_frames = 60
+        k_frames = 120
 
         # Get the n longest tracks and sort them by their start frames
         tracks = list(self.tracks.values())
