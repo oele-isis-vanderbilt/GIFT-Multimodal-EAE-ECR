@@ -69,6 +69,17 @@ source of truth); z is informational metadata.
 |---|---|---|---|---|---|
 | l | `rtmw3d-l-cocktail14-133` | 384×288 (z bins 288) | `rtmw3d-l_8xb64_cocktail14-384x288` | 220 MB | 58 M |
 
+Implementation notes:
+- Detections are **batched per frame** exactly like the 2D backends (all
+  person crops in one stacked forward).
+- Keypoint scores use the upstream convention `min(max_x, max_y)` — the z
+  branch is excluded (its softmax-trained logits are an order of magnitude
+  smaller and would starve downstream confidence thresholds).
+- `pose3d` runs additionally save `{basename}_Pose3D_Skeletons.mp4`: a 3D
+  matplotlib plot video of every tracked skeleton, color-coded by track id
+  (x = image x, y = metric depth z, z = height). Inspection artifact, not an
+  AAR overlay; disable with `"annotate_pose3d_plot": false`.
+
 ## Auto-download
 
 With `"auto_download_models": true`, any registered architecture whose

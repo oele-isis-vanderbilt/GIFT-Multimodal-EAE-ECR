@@ -1177,6 +1177,9 @@ class ProcessingEngine:
                     self.video_basename,
                     inroom_ids,
                     gaze_conf_threshold=self.pose_conf_threshold,
+                    draw_extended_keypoints=bool(
+                        config.get("draw_extended_keypoints", False)
+                    ),
                 )
             )
             camera_overlay_keys.append("annotate_camera_video")
@@ -1276,6 +1279,22 @@ class ProcessingEngine:
                     end_frame=drill_end_frame,
                 )
                 save_room_coverage_cache(coverage_data, self.output_directory, self.video_basename)
+
+        # 3D skeleton plot video (pose3d backend only; inspection artifact,
+        # color-coded by track id). No-ops when the run carries no z data.
+        if bool(config.get("annotate_pose3d_plot", True)):
+            try:
+                from src.pose3d_viz import render_pose3d_plot_video
+                render_pose3d_plot_video(
+                    tracker_output,
+                    frame_rate=config["frame_rate"],
+                    output_directory=self.output_directory,
+                    video_basename=self.video_basename,
+                    start_frame=drill_start_frame,
+                    end_frame=drill_end_frame,
+                )
+            except Exception:
+                logging.warning("Pose3D plot rendering failed; continuing.", exc_info=True)
 
         tracker_json_path = os.path.join(self.output_directory, f"{self.video_basename}_TrackerOutput.json")
         with open(tracker_json_path, "w") as f:

@@ -40,10 +40,14 @@ def decode_simcc3d(
     y_locs = np.argmax(simcc_y, axis=2).astype(np.float32)
     z_locs = np.argmax(simcc_z, axis=2).astype(np.float32)
 
+    # Score convention mirrors upstream rtmpose3d.utils.get_simcc_maximum:
+    # min(max_x, max_y), with z EXCLUDED — the z branch is trained with a
+    # softmax label (label_beta=10) so its raw logit maxima are an order of
+    # magnitude smaller than x/y and would tank every keypoint score
+    # (observed: ~0.35 vs ~7, silently failing downstream conf thresholds).
     max_x = np.amax(simcc_x, axis=2)
     max_y = np.amax(simcc_y, axis=2)
-    max_z = np.amax(simcc_z, axis=2)
-    vals = np.minimum(np.minimum(max_x, max_y), max_z).astype(np.float32)
+    vals = np.minimum(max_x, max_y).astype(np.float32)
 
     kpts_xy = np.stack((x_locs, y_locs), axis=-1) / float(simcc_split_ratio)
     kpts_xy[vals <= 0.0] = -1

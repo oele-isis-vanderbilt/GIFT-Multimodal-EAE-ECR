@@ -478,6 +478,7 @@ def camera_tracking_overlay_spec(
     video_basename: str,
     inroom_ids: List[int] = None,
     gaze_conf_threshold: float = 0.3,
+    draw_extended_keypoints: bool = False,
 ) -> Tuple[str, Any]:
     inroom = _normalize_inroom_ids(inroom_ids)
     predefined_colors, track_colors = _build_track_color_cache()
@@ -506,6 +507,22 @@ def camera_tracking_overlay_spec(
                         p1 = (int(kps[i1][0]), int(kps[i1][1]))
                         p2 = (int(kps[i2][0]), int(kps[i2][1]))
                         cv2.line(frame, p1, p2, color, 1)
+
+            # Optional (config ``draw_extended_keypoints``): render the full
+            # 133-kp whole-body set carried by non-default backends — feet,
+            # the 68-pt face mesh (small dots) and hands (small dots) on top
+            # of the canonical skeleton. Off by default so AAR artifacts
+            # stay clean.
+            if draw_extended_keypoints:
+                wb = obj.get("keypoints_wb")
+                wbs = obj.get("keypoint_scores_wb")
+                if wb and wbs and len(wb) == 133:
+                    for i in range(17, 23):      # feet
+                        if wbs[i] >= gaze_conf_threshold:
+                            cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 3, color, -1)
+                    for i in range(23, 133):     # face mesh + hands
+                        if wbs[i] >= gaze_conf_threshold:
+                            cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 1, color, -1)
 
     return out_path, draw
 
