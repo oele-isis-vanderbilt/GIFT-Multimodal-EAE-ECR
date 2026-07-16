@@ -40,3 +40,6 @@ DESCRIPTION.md
 # IEEE TLT paper workspace (validation study, inter-team analysis, paper
 # figures) — data/results, not repo code; never shared via git
 /Results-for-TLT/
+
+# Local export/test artifacts produced in the pose-backends worktree
+/export_artifacts/

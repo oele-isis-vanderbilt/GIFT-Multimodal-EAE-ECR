@@ -47,6 +47,18 @@ class RTMDet(nn.Module):
         return self.forward_features(x)
 
 
+def build_detector(spec) -> RTMDet:
+    """Build a detector from a :class:`libs.giftpose.registry.ArchSpec`.
+
+    Only the RTMDet-m person geometry is registered today; the function
+    exists so backends resolve detectors through the registry the same way
+    they resolve pose models.
+    """
+    if spec.family == "rtmdet" and (spec.deepen_factor, spec.widen_factor) == (0.67, 0.75):
+        return build_rtmdet_m_person()
+    raise NotImplementedError(f"Detector spec {spec.tag!r} is not available yet.")
+
+
 def build_rtmdet_m_person() -> RTMDet:
     """RTMDet-m person detector — matches
     ``libs/mmpose/demo/mmdetection_cfg/rtmdet_m_640-8xb32_coco-person.py`` /

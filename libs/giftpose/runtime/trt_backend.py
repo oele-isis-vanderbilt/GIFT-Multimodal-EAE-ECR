@@ -12,7 +12,8 @@ from typing import Tuple
 import numpy as np
 
 from libs.giftpose.codecs.simcc import decode_simcc
-from libs.giftpose.meta import FLIP_INDICES
+from libs.giftpose.meta import get_meta
+from libs.giftpose.registry import DEFAULT_DET_TAG, DEFAULT_POSE_TAG, resolve_det, resolve_pose
 from libs.giftpose.postprocess.nms import multiclass_nms_torch
 from libs.giftpose.preprocess.letterbox import letterbox, undo_letterbox_xyxy
 from libs.giftpose.preprocess.normalize import (
@@ -66,20 +67,27 @@ class TRTBackend(Backend):
         self,
         det_engine: str,
         pose_engine: str,
-        det_input_size: Tuple[int, int] = (640, 640),
-        pose_input_size: Tuple[int, int] = (288, 384),
+        det_input_size: Tuple[int, int] | None = None,
+        pose_input_size: Tuple[int, int] | None = None,
         flip_test: bool = True,
         det_score_thr: float = 0.05,
         det_iou_threshold: float = 0.6,
         det_max_per_img: int = 100,
         warmup: bool = True,
+        det_spec=None,
+        pose_spec=None,
     ) -> None:
         import torch
         _get_trt()  # fail-fast on missing TRT before any engine load
 
         self.torch = torch
-        self.det_input_size = det_input_size
-        self.pose_input_size = pose_input_size
+        self.det_spec = det_spec or resolve_det(DEFAULT_DET_TAG)
+        self.pose_spec = pose_spec or resolve_pose(DEFAULT_POSE_TAG)
+        self.det_input_size = tuple(det_input_size or self.det_spec.input_size)
+        self.pose_input_size = tuple(pose_input_size or self.pose_spec.input_size)
+        self.num_keypoints = int(self.pose_spec.num_keypoints)
+        self.simcc_split_ratio = float(self.pose_spec.simcc_split_ratio)
+        self.flip_indices = list(get_meta(self.pose_spec.meta).FLIP_INDICES)
         self.flip_test = flip_test
         # Detector NMS knobs — wired through (the PyTorch backend already exposes
         # these; the TRT/ONNX paths previously hardcoded them, so the detector
@@ -236,8 +244,8 @@ class TRTBackend(Backend):
         n = len(boxes_xyxy)
         if n == 0:
             return (
-                np.zeros((0, 26, 2), dtype=np.float32),
-                np.zeros((0, 26), dtype=np.float32),
+                np.zeros((0, self.num_keypoints, 2), dtype=np.float32),
+                np.zeros((0, self.num_keypoints), dtype=np.float32),
             )
 
         crops: list[np.ndarray] = []
@@ -257,8 +265,9 @@ class TRTBackend(Backend):
             # so we run a single (2N, ...) forward.
             x = torch.cat([x, x.flip(dims=(3,))], dim=0)
         B = x.shape[0]
-        Wx = self.pose_input_size[0] * 2  # simcc_split_ratio = 2
-        Hy = self.pose_input_size[1] * 2
+        K = self.num_keypoints
+        Wx = int(self.pose_input_size[0] * self.simcc_split_ratio)
+        Hy = int(self.pose_input_size[1] * self.simcc_split_ratio)
 
         # Chunk by the engine's max profile (typically 32). A single frame
         # with many detections — e.g. 100 people × flip_test=True = 200 —
@@ -269,7 +278,7 @@ class TRTBackend(Backend):
         if B <= max_b:
             outs = self._run_engine(
                 self._pose_ctx, x,
-                out_shapes={"pred_x": (B, 26, Wx), "pred_y": (B, 26, Hy)},
+                out_shapes={"pred_x": (B, K, Wx), "pred_y": (B, K, Hy)},
             )
             px = outs["pred_x"].cpu().numpy()
             py = outs["pred_y"].cpu().numpy()
@@ -280,7 +289,7 @@ class TRTBackend(Backend):
                 bc = xc.shape[0]
                 outs = self._run_engine(
                     self._pose_ctx, xc,
-                    out_shapes={"pred_x": (bc, 26, Wx), "pred_y": (bc, 26, Hy)},
+                    out_shapes={"pred_x": (bc, K, Wx), "pred_y": (bc, K, Hy)},
                 )
                 px_chunks.append(outs["pred_x"].cpu().numpy())
                 py_chunks.append(outs["pred_y"].cpu().numpy())
@@ -290,12 +299,12 @@ class TRTBackend(Backend):
         if self.flip_test:
             px_orig, px_flip = px[:n], px[n:]
             py_orig, py_flip = py[:n], py[n:]
-            flip_idx = np.asarray(FLIP_INDICES, dtype=np.int64)
+            flip_idx = np.asarray(self.flip_indices, dtype=np.int64)
             px_flip = px_flip[:, :, ::-1][:, flip_idx, :]
             py_flip = py_flip[:, flip_idx, :]
             px = (px_orig + px_flip) * 0.5
             py = (py_orig + py_flip) * 0.5
 
-        kpts_in_input, scores = decode_simcc(px, py, simcc_split_ratio=2.0)
+        kpts_in_input, scores = decode_simcc(px, py, simcc_split_ratio=self.simcc_split_ratio)
         kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
         return kpts_in_image, scores.astype(np.float32)

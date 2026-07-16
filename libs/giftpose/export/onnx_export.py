@@ -15,7 +15,8 @@ import torch
 import torch.nn as nn
 
 from libs.giftpose.models.detector import build_rtmdet_m_person
-from libs.giftpose.models.pose_estimator import build_rtmpose_x_halpe26
+from libs.giftpose.models.pose_estimator import build_pose, build_rtmpose_x_halpe26
+from libs.giftpose.registry import DEFAULT_POSE_TAG, resolve_pose
 from libs.giftpose.models.rtmdet_head import decode_rtmdet_dense
 from libs.giftpose.weights.loader import load_state_dict_from_pth, strict_load
 
@@ -77,26 +78,27 @@ def export_onnx_detector(
 def export_onnx_pose(
     weights_path: str | Path,
     out_path: str | Path,
-    input_size: Tuple[int, int] = (288, 384),
+    input_size: Tuple[int, int] | None = None,
     opset: int = 17,
+    pose_tag: str = DEFAULT_POSE_TAG,
 ) -> None:
-    model = build_rtmpose_x_halpe26(input_size=input_size).eval()
+    spec = resolve_pose(pose_tag)
+    model = build_pose(spec).eval()
     strict_load(model, load_state_dict_from_pth(weights_path, "pose"))
-    W, H = input_size
+    W, H = input_size or spec.input_size
     dummy = torch.zeros(1, 3, H, W, dtype=torch.float32)
+    # RTMW3D heads emit a third (z) SimCC output.
+    out_names = ["pred_x", "pred_y"] + (["pred_z"] if spec.has_z else [])
     torch.onnx.export(
         model,
         dummy,
         str(out_path),
         input_names=["images"],
-        output_names=["pred_x", "pred_y"],
+        output_names=out_names,
         opset_version=opset,
         do_constant_folding=True,
-        dynamic_axes={
-            "images": {0: "batch"},
-            "pred_x": {0: "batch"},
-            "pred_y": {0: "batch"},
-        },
+        dynamic_axes={"images": {0: "batch"},
+                      **{n: {0: "batch"} for n in out_names}},
     )
     print(f"wrote {out_path}")
 
@@ -177,6 +179,8 @@ def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--det-weights", default="models/detect-best-mAP.pth")
     p.add_argument("--pose-weights", default="models/pose.pth")
+    p.add_argument("--pose-tag", default=DEFAULT_POSE_TAG,
+                   help="Registry architecture tag for the pose model.")
     p.add_argument("--det-out", default="models/detect-best-mAP.onnx")
     p.add_argument("--pose-out", default="models/pose.onnx")
     p.add_argument("--opset", type=int, default=17)
@@ -190,7 +194,8 @@ def _main(argv: list[str] | None = None) -> int:
     if not args.skip_detector:
         export_onnx_detector(args.det_weights, args.det_out, opset=args.opset)
     if not args.skip_pose:
-        export_onnx_pose(args.pose_weights, args.pose_out, opset=args.opset)
+        export_onnx_pose(args.pose_weights, args.pose_out, opset=args.opset,
+                         pose_tag=args.pose_tag)
 
     if args.verify:
         print("verifying:")

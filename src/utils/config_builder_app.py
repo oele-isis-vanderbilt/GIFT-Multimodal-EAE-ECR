@@ -58,6 +58,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pose2d_config": "rtmpose-x-halpe26-384x288",
     "pose2d_weights": "models/pose.pth",
 
+    # pose backend selection (advanced defaults). See MODELS.md.
+    "pose_backend": "body2d",
+    "pose_model_size": "x",
+    "auto_download_models": False,
+    "facing_metadata": True,
+
     # thresholds (advanced defaults)
     "box_conf_threshold": 0.3,
     "pose_conf_threshold": 0.3,
@@ -117,6 +123,12 @@ COMMENTS: Dict[str, str] = {
     "det_cat_ids": "Detector category IDs to keep (typically [0] for person).",
     "pose2d_config": "2D pose model config (MMPose).",
     "pose2d_weights": "2D pose checkpoint weights file.",
+
+    "pose_backend": "Pose stage backend: 'body2d' (default, 26-kp Halpe26), 'wholebody' (133-kp RTMW incl. face+hands), or 'pose3d' (RTMW3D, adds metric z per keypoint). Downstream tracking/metrics/overlays are identical for all backends via the canonical Halpe26 adapter. See MODELS.md.",
+    "pose_model_size": "Model size for the selected backend. body2d: t/s/m/l/x ('x' = the project's fine-tuned models/pose.pth; other sizes are official checkpoints). wholebody: m/l/x. pose3d: l.",
+    "auto_download_models": "When true, official checkpoints for non-default sizes/backends are downloaded automatically into models/ on first use. The fine-tuned default weights are never downloaded.",
+    "pose_backend_weights": "Optional explicit weights file for a non-default backend (e.g. a future fine-tuned RTMW checkpoint). Overrides the registry download.",
+    "facing_metadata": "When true (default), per-frame per-track facing direction metadata (KGF estimator) is computed from the canonical keypoints and saved to {basename}_FacingCache.txt plus a compact per-object 'facing' field in TrackerOutput.json. Metadata only: no effect on metrics or renderings.",
 
     "box_conf_threshold": "Minimum bbox confidence to accept a detection.",
     "pose_conf_threshold": "Minimum keypoint confidence to accept pose keypoints and render gaze/triangles.",

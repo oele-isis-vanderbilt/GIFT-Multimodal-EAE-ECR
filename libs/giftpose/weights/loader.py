@@ -93,7 +93,9 @@ def _strip_legacy(state_dict: dict, kind: str) -> dict:
     architecture defines (so ``strict_load`` can verify a clean match).
     """
     if kind == "pose":
-        keep = ("backbone.", "head.")
+        # ``neck.`` covers RTMW/RTMW3D pose models; plain RTMPose checkpoints
+        # simply have no neck keys, so the filter is a no-op for them.
+        keep = ("backbone.", "neck.", "head.")
     elif kind == "detector":
         keep = ("backbone.", "neck.", "bbox_head.")
     else:

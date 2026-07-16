@@ -16,6 +16,7 @@ warnings.filterwarnings(
 
 import cv2
 import numpy as np
+from libs.giftpose.adapters import to_canonical
 from libs.giftpose.inferencer import MMPoseInferencer
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points
@@ -45,6 +46,7 @@ from src.helper_functions import (
     tracking_with_clearance_overlay_spec,
 )
 
+from .facing import attach_facing_metadata, compute_facing, save_facing_cache
 from .metrics import *
 from .metrics._shared import load_door_axes
 from .metrics.context import MetricContext
@@ -71,6 +73,15 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 logging.getLogger("libs.Track.trackers.basetracker").setLevel(logging.ERROR)
+
+
+def _extras_key(kps: np.ndarray) -> tuple:
+    """Stable per-detection key for re-attaching extended-keypoint metadata
+    after the tracker pass. Built from the canonical block's first rows,
+    rounded so float32/float64 round-trips through the tracker still match.
+    """
+    arr = np.asarray(kps, dtype=np.float64)
+    return tuple(np.round(arr[:5, :2], 2).ravel().tolist())
 
 
 VIS_VMETA_SUFFIX: Dict[str, str] = {
@@ -339,6 +350,62 @@ class ProcessingEngine:
         self.config = config if config is not None else None
         logging.debug("Ready to receive requests.")
 
+    @staticmethod
+    def _resolve_pose_selection(config: dict) -> tuple[str, str]:
+        """Resolve (pose_tag, pose_weights_path) from the pose-backend keys.
+
+        Config surface (all optional — omitting every key reproduces the
+        legacy behavior exactly):
+          - ``pose_backend``: "body2d" (default) | "wholebody" | "pose3d"
+          - ``pose_model_size``: "t"/"s"/"m"/"l"/"x" (meaning depends on the
+            backend; body2d "x" = the project's fine-tuned checkpoint)
+          - ``auto_download_models``: allow fetching official checkpoints
+          - ``pose2d_config`` / ``pose2d_weights``: explicit architecture tag
+            and weights — always win when the new keys are absent, and serve
+            as the weights override when they are present (e.g. a future
+            fine-tuned RTMW).
+        """
+        from libs.giftpose.registry import resolve_pose
+        from libs.giftpose.weights.download import resolve_weights
+
+        backend = str(config.get("pose_backend") or "body2d").lower()
+        size = config.get("pose_model_size")
+        auto_dl = bool(config.get("auto_download_models", False))
+
+        legacy_tag = config.get("pose2d_config", "rtmpose-x-halpe26-384x288")
+        legacy_weights = config.get("pose2d_weights", "models/pose.pth")
+
+        if backend == "body2d" and size in (None, "", "x"):
+            # Default path — identical to the pre-backend-selection engine.
+            return legacy_tag, legacy_weights
+
+        if backend == "body2d":
+            tag = f"rtmpose-{size}-halpe26-256x192"
+        elif backend == "wholebody":
+            tag = f"rtmw-{size or 'l'}-cocktail14-133"
+        elif backend == "pose3d":
+            tag = f"rtmw3d-{size or 'l'}-cocktail14-133"
+        else:
+            raise ValueError(
+                f"Unknown pose_backend {backend!r}; expected one of "
+                f"'body2d', 'wholebody', 'pose3d'."
+            )
+
+        spec = resolve_pose(tag)  # raises with the supported-tag list
+        # ``pose_backend_weights`` (dedicated key) overrides the registry
+        # download for non-default backends — this is how a future fine-tuned
+        # checkpoint for e.g. RTMW gets plugged in. ``pose2d_weights`` is
+        # deliberately NOT reused here: it names the body2d default weights
+        # (and is path-absolutized by load_config), so borrowing it would
+        # feed a 26-kp checkpoint to a 133-kp architecture.
+        weights = resolve_weights(
+            spec,
+            configured_path=config.get("pose_backend_weights"),
+            models_dir="models",
+            auto_download=auto_dl,
+        )
+        return tag, weights
+
     def _initialize_components(self, vmeta_path: Optional[str] = None):
         if vmeta_path is None:
             return
@@ -369,9 +436,16 @@ class ProcessingEngine:
         # det_thresh / entry_conf_threshold). The detector won't emit or
         # pose-estimate boxes weaker than the tracker would use anyway.
         box_conf_threshold = self.config.get("box_conf_threshold", 0.3)
+        pose_tag, pose_weights = self._resolve_pose_selection(self.config)
+        self.pose_tag = pose_tag
+        # Keypoint layout produced by the pose backend. Everything downstream
+        # of the canonical adapter always sees Halpe-26; this only controls
+        # whether the adapter has any work to do ("halpe26" -> identity).
+        from libs.giftpose.registry import resolve_pose as _resolve_pose_spec
+        self.pose_meta = _resolve_pose_spec(pose_tag).meta
         self.inferencer = MMPoseInferencer(
-            pose2d=self.config["pose2d_config"],
-            pose2d_weights=self.config["pose2d_weights"],
+            pose2d=pose_tag,
+            pose2d_weights=pose_weights,
             device=self.config.get("device", "cpu"),
             det_model=self.config["det_model"],
             det_weights=self.config["det_weights"],
@@ -726,6 +800,7 @@ class ProcessingEngine:
 
             dets = []
             matched_keypoints = []
+            inst_z = []  # per-instance metric-z (pose3d backends), else None
 
             for inst in instances:
                 bbox = inst["bbox"][0]
@@ -745,10 +820,44 @@ class ProcessingEngine:
                     scores = np.ones((kps.shape[0],))
                 kps3 = np.concatenate([kps, scores[:, None]], axis=1)
                 matched_keypoints.append(kps3)
+                inst_z.append(inst.get("keypoint_z"))
 
             dets = np.array(dets)
             if dets.size == 0:
                 dets = np.empty((0, 6))
+
+            # Canonical adapter: non-default backends (wholebody / pose3d)
+            # emit K != 26; convert to the Halpe-26 layout before the tracker
+            # so every downstream consumer keeps its index semantics. The
+            # default backend never enters this branch (identity path).
+            extras_by_key: dict = {}
+            if matched_keypoints and getattr(self, "pose_meta", "halpe26") != "halpe26":
+                raw = np.stack(matched_keypoints, axis=0)  # (N, K, 3)
+                kpts26, scores26, extras = to_canonical(
+                    raw[:, :, :2].astype(np.float32),
+                    raw[:, :, 2].astype(np.float32),
+                    self.pose_meta,
+                )
+                matched_keypoints = [
+                    np.concatenate([kpts26[i], scores26[i][:, None]], axis=1)
+                    for i in range(raw.shape[0])
+                ]
+                if any(z is not None for z in inst_z):
+                    extras["z_values"] = np.stack([
+                        np.asarray(z, dtype=np.float32)
+                        if z is not None else np.zeros(raw.shape[1], np.float32)
+                        for z in inst_z
+                    ])
+                if extras:
+                    wb_k = extras.get("wb_keypoints")
+                    wb_s = extras.get("wb_scores")
+                    zs = extras.get("z_values")
+                    for i, row in enumerate(matched_keypoints):
+                        extras_by_key[_extras_key(row)] = (
+                            wb_k[i] if wb_k is not None else None,
+                            wb_s[i] if wb_s is not None else None,
+                            zs[i] if zs is not None else None,
+                        )
 
             if matched_keypoints:
                 matched_keypoints = np.array(matched_keypoints)
@@ -811,23 +920,41 @@ class ProcessingEngine:
                             float(direction[1]),
                         )
 
-                frame_objects.append(
-                    {
-                        "id": trk_id,
-                        "bbox": bbox,
-                        "confidence": float(bbox_confidence) if bbox_confidence is not None else None,
-                        "class": int(track_class) if track_class is not None else None,
-                        "ankle_based_point": ankle_based_point,
-                        "current_map_pos": current_map_pos,
-                        "map_velocity": map_velocity,
-                        "keypoints": keypoints,
-                        "keypoint_scores": keypoint_scores,
-                        "identity_role": trk.get("identity_role", None),
-                        "birth_location": trk.get("birth_location", None),
-                        "is_inroom": bool(trk.get("is_inroom", False)),
-                        "is_entry": bool(trk.get("is_entry", False)),
-                    }
-                )
+                obj = {
+                    "id": trk_id,
+                    "bbox": bbox,
+                    "confidence": float(bbox_confidence) if bbox_confidence is not None else None,
+                    "class": int(track_class) if track_class is not None else None,
+                    "ankle_based_point": ankle_based_point,
+                    "current_map_pos": current_map_pos,
+                    "map_velocity": map_velocity,
+                    "keypoints": keypoints,
+                    "keypoint_scores": keypoint_scores,
+                    "identity_role": trk.get("identity_role", None),
+                    "birth_location": trk.get("birth_location", None),
+                    "is_inroom": bool(trk.get("is_inroom", False)),
+                    "is_entry": bool(trk.get("is_entry", False)),
+                }
+                # Optional extended-keypoint metadata (non-default backends
+                # only): matched back to the track via the canonical block the
+                # tracker passes through. Absent for unmatched (coasting)
+                # tracks — extras are strictly optional per frame.
+                if extras_by_key and kps is not None and kps.shape[0] == 26:
+                    ex = extras_by_key.get(_extras_key(np.asarray(kps)))
+                    if ex is not None:
+                        wb_k, wb_s, z_vals = ex
+                        if wb_k is not None:
+                            obj["keypoints_wb"] = np.round(
+                                np.asarray(wb_k, dtype=float), 2
+                            ).tolist()
+                            obj["keypoint_scores_wb"] = np.round(
+                                np.asarray(wb_s, dtype=float), 3
+                            ).tolist()
+                        if z_vals is not None:
+                            obj["keypoints_z"] = np.round(
+                                np.asarray(z_vals, dtype=float), 4
+                            ).tolist()
+                frame_objects.append(obj)
 
             tracker_output.append({"frame": frame_num, "objects": frame_objects})
 
@@ -955,6 +1082,34 @@ class ProcessingEngine:
 
         save_position_cache(all_map_points, self.output_directory, self.video_basename)
         save_gaze_cache(gaze_info, self.output_directory, self.video_basename)
+
+        # ------------------------------------------------------------------
+        # KGF facing metadata (all pose backends; metadata only). Computed
+        # from the canonical Halpe-26 keypoints so it is backend-invariant;
+        # persisted as a sidecar cache + compact per-object field. Nothing
+        # in renderings, metrics or the analysis payload consumes it yet.
+        # ------------------------------------------------------------------
+        if bool(config.get("facing_metadata", True)):
+            try:
+                facing_door_axes = []
+                if self.boundary is not None and getattr(self, "entry_polys", None):
+                    try:
+                        facing_door_axes = load_door_axes(
+                            list(self.boundary.exterior.coords),
+                            [list(p.exterior.coords) for p in self.entry_polys],
+                        )
+                    except Exception:
+                        facing_door_axes = []
+                facing = compute_facing(
+                    tracker_output,
+                    fps=fps,
+                    pixel_mapper=self.mapper,
+                    door_axes=facing_door_axes,
+                )
+                attach_facing_metadata(tracker_output, facing)
+                save_facing_cache(facing, self.output_directory, self.video_basename)
+            except Exception:
+                logging.warning("Facing-metadata computation failed; continuing without it.", exc_info=True)
 
         preserve_audio_enabled = (
             bool(config.get("preserve_audio", True))

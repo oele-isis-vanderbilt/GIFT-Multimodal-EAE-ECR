@@ -22,17 +22,25 @@ class CSPNeXtPAFPN(nn.Module):
     def __init__(
         self,
         in_channels: Sequence[int],
-        out_channels: int,
+        out_channels: int | None,
         num_csp_blocks: int = 3,
         expand_ratio: float = 0.5,
         norm_cfg: dict | None = None,
         act_cfg: dict | None = None,
+        out_indices: Sequence[int] | None = None,
     ) -> None:
+        """``out_channels=None`` preserves per-level channel counts (no
+        ``out_convs``) — the RTMW/RTMW3D pose-neck configuration; upstream
+        checkpoints for those models carry no ``out_convs`` keys.
+        ``out_indices`` selects which pyramid levels are returned
+        (``None`` = all levels — the detector's behavior).
+        """
         super().__init__()
         norm_cfg = norm_cfg or _DEFAULT_NORM
         act_cfg = act_cfg or _DEFAULT_ACT
         self.in_channels = list(in_channels)
         self.out_channels = out_channels
+        self.out_indices = tuple(out_indices) if out_indices is not None else None
 
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
@@ -78,12 +86,16 @@ class CSPNeXtPAFPN(nn.Module):
                 )
             )
 
-        # Per-level 3x3 ConvBNAct collapsing each level to the shared neck width.
-        self.out_convs = nn.ModuleList([
-            ConvBNAct(self.in_channels[i], out_channels, 3, padding=1,
-                      norm_cfg=norm_cfg, act_cfg=act_cfg)
-            for i in range(len(self.in_channels))
-        ])
+        # Per-level 3x3 ConvBNAct collapsing each level to the shared neck
+        # width. Skipped for ``out_channels=None`` (RTMW-style pose necks).
+        if out_channels is not None:
+            self.out_convs = nn.ModuleList([
+                ConvBNAct(self.in_channels[i], out_channels, 3, padding=1,
+                          norm_cfg=norm_cfg, act_cfg=act_cfg)
+                for i in range(len(self.in_channels))
+            ])
+        else:
+            self.out_convs = None
 
     def forward(self, inputs: Tuple[torch.Tensor, ...]) -> Tuple[torch.Tensor, ...]:
         assert len(inputs) == len(self.in_channels)
@@ -108,6 +120,9 @@ class CSPNeXtPAFPN(nn.Module):
             out = self.bottom_up_blocks[idx](torch.cat([downsample, feat_high], dim=1))
             outs.append(out)
 
-        for idx, conv in enumerate(self.out_convs):
-            outs[idx] = conv(outs[idx])
+        if self.out_convs is not None:
+            for idx, conv in enumerate(self.out_convs):
+                outs[idx] = conv(outs[idx])
+        if self.out_indices is not None:
+            return tuple(outs[i] for i in self.out_indices)
         return tuple(outs)

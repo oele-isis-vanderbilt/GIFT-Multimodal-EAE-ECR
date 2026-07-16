@@ -12,27 +12,8 @@ from typing import Any, Iterator, Sequence
 import numpy as np
 
 from libs.giftpose.postprocess.pose_nms import nearby_joints_nms
+from libs.giftpose.registry import resolve_det, resolve_pose
 from libs.giftpose.runtime.autoselect import select_backend
-
-
-# Legacy-config-string -> short identifier mapping. Both the new
-# tags and the old vendored mmpose paths resolve here.
-_DET_TAGS = {
-    "rtmdet-m-person-640",
-    "libs/mmpose/demo/mmdetection_cfg/rtmdet_m_640-8xb32_coco-person.py",
-}
-_POSE_TAGS = {
-    "rtmpose-x-halpe26-384x288",
-    "libs/mmpose/configs/body_2d_keypoint/rtmpose/body8/rtmpose-x_8xb256-700e_body8-halpe26-384x288.py",
-}
-
-
-def _validate_tag(tag: str, valid: set[str], kind: str) -> None:
-    if tag not in valid:
-        raise ValueError(
-            f"Unsupported {kind} model identifier {tag!r}. "
-            f"Supported values: {sorted(valid)}"
-        )
 
 
 class MMPoseInferencer:
@@ -59,8 +40,10 @@ class MMPoseInferencer:
         det_iou_threshold: float = 0.6,
         det_max_per_img: int = 100,
     ) -> None:
-        _validate_tag(pose2d, _POSE_TAGS, "pose2d")
-        _validate_tag(det_model, _DET_TAGS, "det_model")
+        pose_spec = resolve_pose(pose2d)   # raises with supported tags listed
+        det_spec = resolve_det(det_model)
+        self.pose_spec = pose_spec
+        self.det_spec = det_spec
         # det_cat_ids: ignored — the GIFT detector is single-class person.
         self._det_cat_ids = tuple(det_cat_ids)
 
@@ -79,6 +62,8 @@ class MMPoseInferencer:
             det_score_thr=det_score_thr,
             det_iou_threshold=det_iou_threshold,
             det_max_per_img=det_max_per_img,
+            det_spec=det_spec,
+            pose_spec=pose_spec,
         )
 
         # ``flip_test`` doubles the pose batch (original + horizontally
@@ -129,7 +114,12 @@ class MMPoseInferencer:
         if det.boxes_xyxy.shape[0] == 0:
             return []
 
-        kpts, kp_scores = self.backend.predict_pose(image, det.boxes_xyxy)
+        pose_out = self.backend.predict_pose(image, det.boxes_xyxy)
+        if len(pose_out) == 3:
+            kpts, kp_scores, kp_z = pose_out  # 3D backends add metric z
+        else:
+            kpts, kp_scores = pose_out
+            kp_z = None
 
         if pose_based_nms and len(det.scores) > 1:
             num_keypoints = kpts.shape[1]
@@ -146,16 +136,19 @@ class MMPoseInferencer:
             det.scores = det.scores[keep_idx]
             kpts = kpts[keep_idx]
             kp_scores = kp_scores[keep_idx]
+            if kp_z is not None:
+                kp_z = kp_z[keep_idx]
 
         results: list[dict] = []
         for i in range(det.boxes_xyxy.shape[0]):
             x1, y1, x2, y2 = det.boxes_xyxy[i].tolist()
-            results.append(
-                {
-                    "bbox": [[x1, y1, x2, y2]],
-                    "bbox_score": float(det.scores[i]),
-                    "keypoints": kpts[i],
-                    "keypoint_scores": kp_scores[i],
-                }
-            )
+            inst = {
+                "bbox": [[x1, y1, x2, y2]],
+                "bbox_score": float(det.scores[i]),
+                "keypoints": kpts[i],
+                "keypoint_scores": kp_scores[i],
+            }
+            if kp_z is not None:
+                inst["keypoint_z"] = kp_z[i]
+            results.append(inst)
         return results

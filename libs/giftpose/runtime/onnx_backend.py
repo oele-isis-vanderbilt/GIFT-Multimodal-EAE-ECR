@@ -16,7 +16,8 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from libs.giftpose.codecs.simcc import decode_simcc
-from libs.giftpose.meta import FLIP_INDICES
+from libs.giftpose.meta import get_meta
+from libs.giftpose.registry import DEFAULT_DET_TAG, DEFAULT_POSE_TAG, resolve_det, resolve_pose
 from libs.giftpose.postprocess.nms import multiclass_nms_numpy
 from libs.giftpose.preprocess.letterbox import letterbox, undo_letterbox_xyxy
 from libs.giftpose.preprocess.normalize import (
@@ -67,18 +68,25 @@ class ONNXBackend(Backend):
         det_onnx: str,
         pose_onnx: str,
         device: str = "cpu",
-        det_input_size: Tuple[int, int] = (640, 640),
-        pose_input_size: Tuple[int, int] = (288, 384),
+        det_input_size: Tuple[int, int] | None = None,
+        pose_input_size: Tuple[int, int] | None = None,
         flip_test: bool = True,
         det_score_thr: float = 0.05,
         det_iou_threshold: float = 0.6,
         det_max_per_img: int = 100,
+        det_spec=None,
+        pose_spec=None,
     ) -> None:
         import onnxruntime as ort
 
         self.device = device
-        self.det_input_size = det_input_size
-        self.pose_input_size = pose_input_size
+        self.det_spec = det_spec or resolve_det(DEFAULT_DET_TAG)
+        self.pose_spec = pose_spec or resolve_pose(DEFAULT_POSE_TAG)
+        self.det_input_size = tuple(det_input_size or self.det_spec.input_size)
+        self.pose_input_size = tuple(pose_input_size or self.pose_spec.input_size)
+        self.num_keypoints = int(self.pose_spec.num_keypoints)
+        self.simcc_split_ratio = float(self.pose_spec.simcc_split_ratio)
+        self.flip_indices = list(get_meta(self.pose_spec.meta).FLIP_INDICES)
         self.flip_test = flip_test
         # Detector NMS knobs — wired through for parity with the PyTorch backend
         # (previously hardcoded on this path).
@@ -139,8 +147,8 @@ class ONNXBackend(Backend):
         n = len(boxes_xyxy)
         if n == 0:
             return (
-                np.zeros((0, 26, 2), dtype=np.float32),
-                np.zeros((0, 26), dtype=np.float32),
+                np.zeros((0, self.num_keypoints, 2), dtype=np.float32),
+                np.zeros((0, self.num_keypoints), dtype=np.float32),
             )
 
         crops: list[np.ndarray] = []
@@ -160,12 +168,12 @@ class ONNXBackend(Backend):
         if self.flip_test:
             px_orig, px_flip = px[:n], px[n:]
             py_orig, py_flip = py[:n], py[n:]
-            flip_idx = np.asarray(FLIP_INDICES, dtype=np.int64)
+            flip_idx = np.asarray(self.flip_indices, dtype=np.int64)
             px_flip = px_flip[:, :, ::-1][:, flip_idx, :]
             py_flip = py_flip[:, flip_idx, :]
             px = (px_orig + px_flip) * 0.5
             py = (py_orig + py_flip) * 0.5
 
-        kpts_in_input, scores = decode_simcc(px, py, simcc_split_ratio=2.0)
+        kpts_in_input, scores = decode_simcc(px, py, simcc_split_ratio=self.simcc_split_ratio)
         kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
         return kpts_in_image, scores.astype(np.float32)

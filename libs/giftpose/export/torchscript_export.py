@@ -23,7 +23,8 @@ from typing import Tuple
 import torch
 
 from libs.giftpose.models.detector import build_rtmdet_m_person
-from libs.giftpose.models.pose_estimator import build_rtmpose_x_halpe26
+from libs.giftpose.models.pose_estimator import build_pose, build_rtmpose_x_halpe26
+from libs.giftpose.registry import DEFAULT_POSE_TAG, resolve_pose
 from libs.giftpose.weights.loader import load_state_dict_from_pth, strict_load
 from libs.giftpose.export.onnx_export import _DetectorWithDecode
 
@@ -70,13 +71,15 @@ def export_torchscript_detector(
 def export_torchscript_pose(
     weights_path: str | Path,
     out_path: str | Path,
-    input_size: Tuple[int, int] = (288, 384),
+    input_size: Tuple[int, int] | None = None,
     device: str = "cpu",
+    pose_tag: str = DEFAULT_POSE_TAG,
 ) -> None:
     dev = torch.device(device)
-    model = build_rtmpose_x_halpe26(input_size=input_size).to(dev).eval()
+    spec = resolve_pose(pose_tag)
+    model = build_pose(spec).to(dev).eval()
     strict_load(model, load_state_dict_from_pth(weights_path, "pose"))
-    W, H = input_size
+    W, H = input_size or spec.input_size
     dummy = torch.zeros(1, 3, H, W, dtype=torch.float32, device=dev)
     with torch.no_grad():
         traced = torch.jit.trace(model, dummy, strict=False, check_trace=False)
@@ -92,6 +95,7 @@ def verify_torchscript(
     kind: str,
     device: str = "cpu",
     sample_frame: str | None = "input/Videos/Crested_Gecko/8-Trimmed.mp4",
+    pose_tag: str = DEFAULT_POSE_TAG,
 ) -> None:
     """Load the traced module + the eager model side-by-side, run both on the
     same dummy input, and report max-abs diff.
@@ -110,7 +114,7 @@ def verify_torchscript(
 
     dev = torch.device(device)
     if kind == "pose":
-        model = build_rtmpose_x_halpe26().to(dev).eval()
+        model = build_pose(resolve_pose(pose_tag)).to(dev).eval()
     elif kind == "detector":
         model = _DetectorWithDecode(build_rtmdet_m_person()).to(dev).eval()
     else:
@@ -122,7 +126,11 @@ def verify_torchscript(
 
     # Build a real input tensor — random noise produces 0 detections on the
     # detector, leaving the empty-tensor reduction (.max()) ill-defined.
-    H, W = (384, 288) if kind == "pose" else (640, 640)
+    if kind == "pose":
+        _w, _h = resolve_pose(pose_tag).input_size
+        H, W = _h, _w
+    else:
+        H, W = 640, 640
     x = None
     if sample_frame and Path(sample_frame).exists():
         cap = cv2.VideoCapture(sample_frame)
@@ -175,6 +183,9 @@ def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--det-weights", default="models/detect-best-mAP.pth")
     p.add_argument("--pose-weights", default="models/pose.pth")
+    p.add_argument("--pose-tag", default=DEFAULT_POSE_TAG,
+                   help="Registry architecture tag for the pose model "
+                        "(see libs/giftpose/registry.py POSE_ARCHS).")
     p.add_argument("--device", default="cpu",
                    help="Trace device (cpu|cuda|mps). Intermediate-tensor "
                         "device choices are baked in at trace time, so we "
@@ -199,14 +210,20 @@ def _main(argv: list[str] | None = None) -> int:
     if not args.skip_detector:
         export_torchscript_detector(args.det_weights, det_out, device=args.device)
     if not args.skip_pose:
-        export_torchscript_pose(args.pose_weights, pose_out, device=args.device)
+        export_torchscript_pose(
+            args.pose_weights, pose_out, device=args.device,
+            pose_tag=args.pose_tag,
+        )
 
     if args.verify:
         print("verifying:")
         if not args.skip_detector:
             verify_torchscript(det_out, args.det_weights, "detector", device=args.device)
         if not args.skip_pose:
-            verify_torchscript(pose_out, args.pose_weights, "pose", device=args.device)
+            verify_torchscript(
+                pose_out, args.pose_weights, "pose", device=args.device,
+                pose_tag=args.pose_tag,
+            )
     return 0
 
 

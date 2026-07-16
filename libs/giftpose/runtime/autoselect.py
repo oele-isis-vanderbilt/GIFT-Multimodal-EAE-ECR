@@ -82,6 +82,8 @@ def select_backend(
     det_score_thr: float = 0.05,
     det_iou_threshold: float = 0.6,
     det_max_per_img: int = 100,
+    det_spec=None,
+    pose_spec=None,
 ) -> Backend:
     """Construct and return a ready-to-use backend.
 
@@ -103,6 +105,15 @@ def select_backend(
             ONNX / TRT (those graphs are already optimized at session/engine
             build time). Default False.
     """
+    # Architecture specs default to the registry's production tags so
+    # spec-unaware callers (export scripts, tests) keep working unchanged.
+    if det_spec is None or pose_spec is None:
+        from libs.giftpose.registry import (
+            DEFAULT_DET_TAG, DEFAULT_POSE_TAG, resolve_det, resolve_pose,
+        )
+        det_spec = det_spec or resolve_det(DEFAULT_DET_TAG)
+        pose_spec = pose_spec or resolve_pose(DEFAULT_POSE_TAG)
+
     det_engine = _resolve_artifact(det_weights, ".engine")
     pose_engine = _resolve_artifact(pose_weights, ".engine")
     det_onnx = _resolve_artifact(det_weights, ".onnx")
@@ -111,6 +122,11 @@ def select_backend(
     pose_ts = _resolve_torchscript(pose_weights, device)
 
     want = prefer
+    if want is None and getattr(pose_spec, "has_z", False):
+        # 3D heads emit three SimCC outputs; only the PyTorch backend decodes
+        # them today (artifact backends assume two pose outputs). Exported
+        # 3-output graphs can opt in explicitly via ``prefer``.
+        want = "pytorch"
     if want is None:
         try:
             import torch
@@ -140,25 +156,26 @@ def select_backend(
         det_iou_threshold=det_iou_threshold,
         det_max_per_img=det_max_per_img,
     )
+    specs = dict(det_spec=det_spec, pose_spec=pose_spec)
     if want == "trt":
         from libs.giftpose.runtime.trt_backend import TRTBackend
         assert det_engine and pose_engine
-        return TRTBackend(det_engine, pose_engine, warmup=warmup, **det_nms)
+        return TRTBackend(det_engine, pose_engine, warmup=warmup, **det_nms, **specs)
     if want == "onnx":
         from libs.giftpose.runtime.onnx_backend import ONNXBackend
         assert det_onnx and pose_onnx
         # ONNX EP graph init already happens at session-construction time —
         # no per-shape autotune layer to prime, so no warmup pass.
-        return ONNXBackend(det_onnx, pose_onnx, device=device, **det_nms)
+        return ONNXBackend(det_onnx, pose_onnx, device=device, **det_nms, **specs)
     if want == "torchscript":
         from libs.giftpose.runtime.torchscript_backend import TorchScriptBackend
         assert det_ts and pose_ts
         return TorchScriptBackend(
             det_ts, pose_ts, device=device, warmup=warmup,
-            compile_for_inference=compile_for_inference, **det_nms,
+            compile_for_inference=compile_for_inference, **det_nms, **specs,
         )
     from libs.giftpose.runtime.pytorch_backend import PyTorchBackend
     return PyTorchBackend(
         det_weights, pose_weights, device=device, fp16=fp16, warmup=warmup,
-        compile_for_inference=compile_for_inference, **det_nms,
+        compile_for_inference=compile_for_inference, **det_nms, **specs,
     )

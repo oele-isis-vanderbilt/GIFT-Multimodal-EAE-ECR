@@ -22,9 +22,10 @@ import torch
 logger = logging.getLogger(__name__)
 
 from libs.giftpose.codecs.simcc import decode_simcc
-from libs.giftpose.meta import FLIP_INDICES
-from libs.giftpose.models.detector import build_rtmdet_m_person
-from libs.giftpose.models.pose_estimator import build_rtmpose_x_halpe26
+from libs.giftpose.meta import get_meta
+from libs.giftpose.models.detector import build_detector
+from libs.giftpose.models.pose_estimator import build_pose
+from libs.giftpose.registry import DEFAULT_DET_TAG, DEFAULT_POSE_TAG, resolve_det, resolve_pose
 from libs.giftpose.preprocess.letterbox import letterbox, undo_letterbox_xyxy
 from libs.giftpose.preprocess.normalize import (
     normalize_det_input,
@@ -42,29 +43,36 @@ class PyTorchBackend(Backend):
         pose_weights: str,
         device: str = "cpu",
         fp16: bool | None = None,
-        det_input_size: Tuple[int, int] = (640, 640),
-        pose_input_size: Tuple[int, int] = (288, 384),
+        det_input_size: Tuple[int, int] | None = None,
+        pose_input_size: Tuple[int, int] | None = None,
         flip_test: bool = True,
         det_score_thr: float = 0.05,
         det_iou_threshold: float = 0.6,
         det_max_per_img: int = 100,
         warmup: bool = True,
         compile_for_inference: bool = False,
+        det_spec=None,
+        pose_spec=None,
     ) -> None:
         self.device = torch.device(device)
         if fp16 is None:
             fp16 = self.device.type == "cuda"
         self.fp16 = fp16
-        self.det_input_size = det_input_size
-        self.pose_input_size = pose_input_size
+        self.det_spec = det_spec or resolve_det(DEFAULT_DET_TAG)
+        self.pose_spec = pose_spec or resolve_pose(DEFAULT_POSE_TAG)
+        self.det_input_size = tuple(det_input_size or self.det_spec.input_size)
+        self.pose_input_size = tuple(pose_input_size or self.pose_spec.input_size)
+        self.num_keypoints = int(self.pose_spec.num_keypoints)
+        self.simcc_split_ratio = float(self.pose_spec.simcc_split_ratio)
+        self.flip_indices = list(get_meta(self.pose_spec.meta).FLIP_INDICES)
         self.flip_test = flip_test
         self.det_score_thr = det_score_thr
         self.det_iou_threshold = det_iou_threshold
         self.det_max_per_img = det_max_per_img
 
-        self.detector = build_rtmdet_m_person().to(self.device).eval()
+        self.detector = build_detector(self.det_spec).to(self.device).eval()
         strict_load(self.detector, load_state_dict_from_pth(det_weights, "detector"))
-        self.pose = build_rtmpose_x_halpe26(input_size=pose_input_size).to(self.device).eval()
+        self.pose = build_pose(self.pose_spec).to(self.device).eval()
         strict_load(self.pose, load_state_dict_from_pth(pose_weights, "pose"))
 
         if self.device.type == "cuda":
@@ -139,8 +147,8 @@ class PyTorchBackend(Backend):
         n = len(boxes_xyxy)
         if n == 0:
             return (
-                np.zeros((0, 26, 2), dtype=np.float32),
-                np.zeros((0, 26), dtype=np.float32),
+                np.zeros((0, self.num_keypoints, 2), dtype=np.float32),
+                np.zeros((0, self.num_keypoints), dtype=np.float32),
             )
 
         crops: list[np.ndarray] = []
@@ -162,21 +170,39 @@ class PyTorchBackend(Backend):
             x_in = x_in.contiguous(memory_format=torch.channels_last)
 
         with torch.inference_mode(), self._amp_ctx():
-            px, py = self.pose(x_in)
+            out = self.pose(x_in)
+        px, py = out[0], out[1]
+        pz = out[2] if len(out) == 3 else None  # RTMW3D z branch
 
         if self.flip_test:
+            flip_idx = torch.as_tensor(self.flip_indices, device=px.device, dtype=torch.long)
             px_orig, px_flip = px[:n], px[n:]
             py_orig, py_flip = py[:n], py[n:]
             # Reverse the flipped output along its SimCC axis to undo the
             # horizontal flip; then permute keypoint indices via FLIP_INDICES.
-            flip_idx = torch.as_tensor(FLIP_INDICES, device=px.device, dtype=torch.long)
             px_flip = px_flip.flip(dims=(2,))[:, flip_idx, :]
             py_flip = py_flip[:, flip_idx, :]  # y-axis indices unchanged by horizontal flip
             px = (px_orig + px_flip) * 0.5
             py = (py_orig + py_flip) * 0.5
+            if pz is not None:
+                # Depth is invariant under a horizontal mirror — only the
+                # left/right keypoint identities swap.
+                pz_orig, pz_flip = pz[:n], pz[n:]
+                pz = (pz_orig + pz_flip[:, flip_idx, :]) * 0.5
 
         px_np = to_numpy(px)
         py_np = to_numpy(py)
-        kpts_in_input, scores = decode_simcc(px_np, py_np, simcc_split_ratio=2.0)
+        if pz is not None:
+            from libs.giftpose.codecs.simcc3d import decode_simcc3d
+
+            kpts_in_input, scores, z_metric = decode_simcc3d(
+                px_np, py_np, to_numpy(pz),
+                simcc_split_ratio=self.simcc_split_ratio,
+                z_input_size=self.pose_spec.z_input_size or 288,
+            )
+            kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
+            return kpts_in_image, scores.astype(np.float32), z_metric
+
+        kpts_in_input, scores = decode_simcc(px_np, py_np, simcc_split_ratio=self.simcc_split_ratio)
         kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
         return kpts_in_image, scores.astype(np.float32)

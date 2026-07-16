@@ -631,6 +631,8 @@ If you reorganize folders, update these paths accordingly.
 - `pose2d_config`: pose **architecture tag** — currently `rtmpose-x-halpe26-384x288`.
 - `pose2d_weights`: checkpoint weights for the 2D pose model.
 
+- `pose_backend` / `pose_model_size` / `auto_download_models` / `pose_backend_weights` / `facing_metadata`: optional pose-backend selection — switch the pose stage between the default fine-tuned 26-kp model, official size variants (t/s/m/l/x, auto-downloadable), 133-kp whole-body (RTMW), or 3D (RTMW3D), with identical downstream behavior via the canonical keypoint adapter. **See [MODELS.md](MODELS.md) for the full model documentation.**
+
 - `box_conf_threshold`: minimum bounding-box confidence to accept a detection (post-NMS filter).
 - `pose_conf_threshold`: minimum keypoint confidence to accept keypoints and render gaze/triangles.
 
