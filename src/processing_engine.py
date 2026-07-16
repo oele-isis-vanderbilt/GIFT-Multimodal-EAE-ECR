@@ -1290,6 +1290,7 @@ class ProcessingEngine:
                     frame_rate=config["frame_rate"],
                     output_directory=self.output_directory,
                     video_basename=self.video_basename,
+                    video_path=config.get("video_path"),
                     start_frame=drill_start_frame,
                     end_frame=drill_end_frame,
                 )
