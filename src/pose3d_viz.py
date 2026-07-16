@@ -111,6 +111,9 @@ def render_pose3d_plot_video(
     gx = np.linspace(x_lo, x_hi, 7)
     gz = np.linspace(z_lo, z_hi, 7)
 
+    trail_len = max(2, int(1.5 * frame_rate))
+    trails: dict = {}   # tid -> list of (x, depth) floor footprints
+
     try:
         for idx, fr in enumerate(frames):
             # ---------------- left panel: real frame + 2D skeleton ---------
@@ -152,7 +155,9 @@ def render_pose3d_plot_video(
             ax.set_yticks(np.round(np.linspace(z_lo, z_hi, 4), 2))
             ax.tick_params(labelsize=7)
             ax.set_ylabel("depth (near ⇄ far)", fontsize=8)
-            ax.set_title(f"3D pose — frame {fr['frame']}", fontsize=10)
+            t_sec = fr["frame"] / frame_rate if frame_rate > 0 else 0.0
+            ax.set_title(f"3D pose — t = {t_sec:6.2f} s  (frame {fr['frame']})",
+                         fontsize=10)
             for gxx in gx:
                 ax.plot([gxx, gxx], [z_lo, z_hi], [floor, floor], color="0.85", lw=0.6)
             for gzz in gz:
@@ -188,6 +193,36 @@ def render_pose3d_plot_video(
                     ax.scatter([px], [pd], [floor], color=col, s=18, marker="x")
                     ax.text(px, pd, floor - 18, f"id {tid}", color=col,
                             fontsize=8, ha="center")
+                    # fading floor trail — movement through depth
+                    tr = trails.setdefault(tid, [])
+                    tr.append((px, pd))
+                    del tr[:-trail_len]
+                    if len(tr) >= 2:
+                        txs = [q[0] for q in tr]
+                        tds = [q[1] for q in tr]
+                        ax.plot(txs, tds, [floor] * len(tr),
+                                color=col, lw=1.4, alpha=0.45)
+                    # facing arrow on the floor (KGF metadata: camera-frame
+                    # yaw; 0 = toward camera = decreasing depth)
+                    facing = o.get("facing")
+                    if facing and facing[0] is not None:
+                        yaw = math.radians(float(facing[0]))
+                        ax_len = 0.10 * (x_hi - x_lo)
+                        ad_len = 0.14 * (z_hi - z_lo)
+                        ax.quiver(px, pd, floor,
+                                  math.sin(yaw) * ax_len,
+                                  -math.cos(yaw) * ad_len, 0.0,
+                                  color=col, lw=1.6, alpha=0.9,
+                                  arrow_length_ratio=0.35)
+
+            present = sorted({int(o["id"]) for o in fr.get("objects", [])
+                              if "keypoints_wb" in o and "keypoints_z" in o})
+            if present:
+                from matplotlib.lines import Line2D
+                handles = [Line2D([0], [0], color=_MPL_COLORS[t % len(_MPL_COLORS)],
+                                  lw=2.5, label=f"id {t}") for t in present]
+                ax.legend(handles=handles, loc="upper left", fontsize=7,
+                          framealpha=0.6, borderpad=0.4)
 
             fig.canvas.draw()
             buf = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
