@@ -163,16 +163,31 @@ class ONNXBackend(Backend):
         if self.flip_test:
             x = np.concatenate([x, x[..., ::-1]], axis=0)  # (2N, 3, H, W)
 
-        px, py = self.pose_sess.run(None, {"images": x})  # numpy outputs
+        outs = self.pose_sess.run(None, {"images": x})  # numpy outputs
+        px, py = outs[0], outs[1]
+        pz = outs[2] if len(outs) == 3 else None  # RTMW3D z branch
 
         if self.flip_test:
+            flip_idx = np.asarray(self.flip_indices, dtype=np.int64)
             px_orig, px_flip = px[:n], px[n:]
             py_orig, py_flip = py[:n], py[n:]
-            flip_idx = np.asarray(self.flip_indices, dtype=np.int64)
             px_flip = px_flip[:, :, ::-1][:, flip_idx, :]
             py_flip = py_flip[:, flip_idx, :]
             px = (px_orig + px_flip) * 0.5
             py = (py_orig + py_flip) * 0.5
+            if pz is not None:
+                pz = (pz[:n] + pz[n:][:, flip_idx, :]) * 0.5
+
+        if pz is not None:
+            from libs.giftpose.codecs.simcc3d import decode_simcc3d
+
+            kpts_in_input, scores, z_metric = decode_simcc3d(
+                px, py, pz,
+                simcc_split_ratio=self.simcc_split_ratio,
+                z_input_size=getattr(self.pose_spec, "z_input_size", 0) or 288,
+            )
+            kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
+            return kpts_in_image, scores.astype(np.float32), z_metric
 
         kpts_in_input, scores = decode_simcc(px, py, simcc_split_ratio=self.simcc_split_ratio)
         kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)

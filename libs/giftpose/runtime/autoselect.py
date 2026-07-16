@@ -122,11 +122,6 @@ def select_backend(
     pose_ts = _resolve_torchscript(pose_weights, device)
 
     want = prefer
-    if want is None and getattr(pose_spec, "has_z", False):
-        # 3D heads emit three SimCC outputs; only the PyTorch backend decodes
-        # them today (artifact backends assume two pose outputs). Exported
-        # 3-output graphs can opt in explicitly via ``prefer``.
-        want = "pytorch"
     if want is None:
         try:
             import torch

@@ -150,19 +150,35 @@ class TorchScriptBackend(Backend):
             x = torch.cat([x, x.flip(dims=(3,))], dim=0)
 
         with torch.inference_mode():
-            px, py = self.pose(x)
+            out = self.pose(x)
+        px, py = out[0], out[1]
+        pz = out[2] if len(out) == 3 else None  # RTMW3D z branch
 
         if self.flip_test:
+            flip_idx = torch.as_tensor(self.flip_indices, device=px.device, dtype=torch.long)
             px_orig, px_flip = px[:n], px[n:]
             py_orig, py_flip = py[:n], py[n:]
-            flip_idx = torch.as_tensor(self.flip_indices, device=px.device, dtype=torch.long)
             px_flip = px_flip.flip(dims=(2,))[:, flip_idx, :]
             py_flip = py_flip[:, flip_idx, :]
             px = (px_orig + px_flip) * 0.5
             py = (py_orig + py_flip) * 0.5
+            if pz is not None:
+                pz_orig, pz_flip = pz[:n], pz[n:]
+                pz = (pz_orig + pz_flip[:, flip_idx, :]) * 0.5
 
         px_np = to_numpy(px)
         py_np = to_numpy(py)
+        if pz is not None:
+            from libs.giftpose.codecs.simcc3d import decode_simcc3d
+
+            kpts_in_input, scores, z_metric = decode_simcc3d(
+                px_np, py_np, to_numpy(pz),
+                simcc_split_ratio=self.simcc_split_ratio,
+                z_input_size=getattr(self.pose_spec, "z_input_size", 0) or 288,
+            )
+            kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
+            return kpts_in_image, scores.astype(np.float32), z_metric
+
         kpts_in_input, scores = decode_simcc(px_np, py_np, simcc_split_ratio=self.simcc_split_ratio)
         kpts_in_image = apply_inverse_warps_batched(warp_mats, kpts_in_input)
         return kpts_in_image, scores.astype(np.float32)

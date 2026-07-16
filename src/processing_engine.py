@@ -453,6 +453,7 @@ class ProcessingEngine:
             flip_test=self.config.get("flip_test"),
             compile_for_inference=self.config.get("compile_for_inference"),
             det_score_thr=box_conf_threshold,
+            prefer_backend=self.config.get("prefer_backend"),
         )
 
         self.tracker = OCSORT(

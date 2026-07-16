@@ -108,6 +108,7 @@ def verify_onnx(
     weights_path: str | Path,
     kind: str,
     tol: float = 1e-3,
+    pose_tag: str = DEFAULT_POSE_TAG,
 ) -> float:
     """Run the eager model and the exported ONNX on the same input under
     onnxruntime; return the max-abs output diff and raise if it exceeds ``tol``.
@@ -132,9 +133,10 @@ def verify_onnx(
         strict_load(model.model, load_state_dict_from_pth(weights_path, "detector"))
         H, W = 640, 640
     elif kind == "pose":
-        model = build_rtmpose_x_halpe26().eval()
+        spec = resolve_pose(pose_tag)
+        model = build_pose(spec).eval()
         strict_load(model, load_state_dict_from_pth(weights_path, "pose"))
-        H, W = 384, 288
+        W, H = spec.input_size
     else:
         raise ValueError(f"unknown kind: {kind}")
 
@@ -202,7 +204,8 @@ def _main(argv: list[str] | None = None) -> int:
         if not args.skip_detector:
             verify_onnx(args.det_out, args.det_weights, "detector")
         if not args.skip_pose:
-            verify_onnx(args.pose_out, args.pose_weights, "pose")
+            verify_onnx(args.pose_out, args.pose_weights, "pose",
+                        pose_tag=args.pose_tag)
     return 0
 
 
