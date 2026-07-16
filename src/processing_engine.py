@@ -1178,9 +1178,6 @@ class ProcessingEngine:
                     self.video_basename,
                     inroom_ids,
                     gaze_conf_threshold=self.pose_conf_threshold,
-                    draw_extended_keypoints=bool(
-                        config.get("draw_extended_keypoints", False)
-                    ),
                 )
             )
             camera_overlay_keys.append("annotate_camera_video")

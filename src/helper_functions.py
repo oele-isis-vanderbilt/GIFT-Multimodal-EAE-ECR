@@ -473,12 +473,14 @@ def _draw_track_boxes(
         cv2.putText(frame, id_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 3)
 
 
+from libs.giftpose.meta.wholebody133 import SKELETON as _WB_SKELETON
+
+
 def camera_tracking_overlay_spec(
     output_directory: str,
     video_basename: str,
     inroom_ids: List[int] = None,
     gaze_conf_threshold: float = 0.3,
-    draw_extended_keypoints: bool = False,
 ) -> Tuple[str, Any]:
     inroom = _normalize_inroom_ids(inroom_ids)
     predefined_colors, track_colors = _build_track_color_cache()
@@ -495,6 +497,34 @@ def camera_tracking_overlay_spec(
             id_text = f"ID: InRoom {trk_id}" if trk_id in inroom else f"ID: {trk_id}"
             cv2.putText(frame, id_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 3)
 
+            wb = obj.get("keypoints_wb")
+            wbs = obj.get("keypoint_scores_wb")
+            if wb and wbs and len(wb) == 133:
+                # Whole-body backends: draw the FULL 133-kp skeleton — body +
+                # feet + hand finger links (edges from the COCO-WholeBody
+                # metainfo) and the 68 face landmarks as fine dots. The
+                # canonical-26 subset is NOT drawn on top (it is derived from
+                # these same points and would double the limb lines).
+                for i1, i2 in _WB_SKELETON:
+                    if wbs[i1] >= gaze_conf_threshold and wbs[i2] >= gaze_conf_threshold:
+                        cv2.line(frame, (int(wb[i1][0]), int(wb[i1][1])),
+                                 (int(wb[i2][0]), int(wb[i2][1])), color, 1)
+                # attach hands to the arms (wrist -> hand root)
+                for wr, hr in ((9, 91), (10, 112)):
+                    if wbs[wr] >= gaze_conf_threshold and wbs[hr] >= gaze_conf_threshold:
+                        cv2.line(frame, (int(wb[wr][0]), int(wb[wr][1])),
+                                 (int(wb[hr][0]), int(wb[hr][1])), color, 1)
+                for i in range(23):              # body + feet points
+                    if wbs[i] >= gaze_conf_threshold:
+                        cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 3, color, -1)
+                for i in range(23, 91):          # face landmarks (dots only)
+                    if wbs[i] >= gaze_conf_threshold:
+                        cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 1, color, -1)
+                for i in range(91, 133):         # hand points
+                    if wbs[i] >= gaze_conf_threshold:
+                        cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 2, color, -1)
+                continue
+
             kps = obj.get("keypoints", [])
             scores = obj.get("keypoint_scores", [])
             if len(kps) == 26 and len(scores) == 26:
@@ -507,22 +537,6 @@ def camera_tracking_overlay_spec(
                         p1 = (int(kps[i1][0]), int(kps[i1][1]))
                         p2 = (int(kps[i2][0]), int(kps[i2][1]))
                         cv2.line(frame, p1, p2, color, 1)
-
-            # Optional (config ``draw_extended_keypoints``): render the full
-            # 133-kp whole-body set carried by non-default backends — feet,
-            # the 68-pt face mesh (small dots) and hands (small dots) on top
-            # of the canonical skeleton. Off by default so AAR artifacts
-            # stay clean.
-            if draw_extended_keypoints:
-                wb = obj.get("keypoints_wb")
-                wbs = obj.get("keypoint_scores_wb")
-                if wb and wbs and len(wb) == 133:
-                    for i in range(17, 23):      # feet
-                        if wbs[i] >= gaze_conf_threshold:
-                            cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 3, color, -1)
-                    for i in range(23, 133):     # face mesh + hands
-                        if wbs[i] >= gaze_conf_threshold:
-                            cv2.circle(frame, (int(wb[i][0]), int(wb[i][1])), 1, color, -1)
 
     return out_path, draw
 

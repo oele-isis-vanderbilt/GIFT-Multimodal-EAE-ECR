@@ -130,12 +130,13 @@ Disable with `"facing_metadata": false`.
 
 ## Visualization policy (AAR)
 
-Rendered overlay videos are consumed in the Analysis Viewer for After-Action
-Reviews and stay **identical in style across all backends**: canonical-26
-skeleton, gaze triangles, map renderings only. The 133-kp set and z values
-are never drawn by default (no dot-cloud clutter). A debug-only
-`draw_extended_keypoints` flag exists for development inspection and is not
-intended for AAR artifacts.
+Rendered overlay videos follow the selected model: the default `body2d`
+backend draws the canonical-26 skeleton exactly as before, while
+`wholebody` / `pose3d` runs draw the **full 133-keypoint skeleton** in the
+tracking overlay — body + feet + hand finger links (edges from the
+COCO-WholeBody metainfo, hands attached at the wrists) with the 68 face
+landmarks as fine dots. Gaze triangles and map renderings are identical
+across backends. `pose3d` additionally saves the 3D skeleton plot video.
 
 ## Exports / runtime backends
 

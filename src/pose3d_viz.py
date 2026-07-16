@@ -26,10 +26,17 @@ logger = logging.getLogger(__name__)
 
 # Body + feet skeleton in COCO-WholeBody indexing (face/hands intentionally
 # not drawn — they turn the plot into an unreadable point cloud).
+# Mirrors the artifact video's _CAMERA_SKELETON structure in COCO-WholeBody
+# indexing: face links, full limbs, heel/toe fans. WholeBody has no neck
+# keypoint — the head-to-torso link is drawn via a synthetic neck (shoulder
+# midpoint) inside the render loops.
 _EDGES = [
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
-    (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
-    (15, 19), (19, 17), (16, 22), (22, 20),
+    (0, 1), (0, 2), (1, 3), (2, 4),                       # nose-eyes-ears
+    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),              # shoulders/arms
+    (5, 11), (6, 12), (11, 12),                           # torso
+    (11, 13), (13, 15), (12, 14), (14, 16),               # legs
+    (15, 19), (19, 17), (19, 18),                         # L ankle-heel-toes
+    (16, 22), (22, 20), (22, 21),                         # R ankle-heel-toes
 ]
 _HEAD_IDX = 0            # nose — drawn as an enlarged head marker
 _BGR_COLORS = [          # cv2 (BGR) — kept in sync with _MPL_COLORS
@@ -134,6 +141,12 @@ def render_pose3d_plot_video(
                                 if sc[a] >= conf_thr and sc[b] >= conf_thr:
                                     cv2.line(img, (int(wb[a][0]), int(wb[a][1])),
                                              (int(wb[b][0]), int(wb[b][1])), col, 2)
+                            if (sc[0] >= conf_thr and sc[5] >= conf_thr
+                                    and sc[6] >= conf_thr):
+                                nx = int((wb[5][0] + wb[6][0]) / 2)
+                                ny = int((wb[5][1] + wb[6][1]) / 2)
+                                cv2.line(img, (int(wb[0][0]), int(wb[0][1])),
+                                         (nx, ny), col, 2)
                     h, w = img.shape[:2]
                     s = min(LEFT_W / w, PH / h)
                     rs = cv2.resize(img, (int(w * s), int(h * s)))
@@ -177,6 +190,11 @@ def render_pose3d_plot_video(
                     if ok[a] and ok[b]:
                         ax.plot([X[a], X[b]], [D[a], D[b]], [H[a], H[b]],
                                 color=col, lw=2.2, solid_capstyle="round")
+                if ok[0] and ok[5] and ok[6]:
+                    ax.plot([X[0], (X[5] + X[6]) / 2],
+                            [D[0], (D[5] + D[6]) / 2],
+                            [H[0], (H[5] + H[6]) / 2],
+                            color=col, lw=2.2, solid_capstyle="round")
                 body = np.where(ok[:23])[0]
                 ax.scatter(X[body], D[body], H[body], color=col, s=10,
                            depthshade=False)
