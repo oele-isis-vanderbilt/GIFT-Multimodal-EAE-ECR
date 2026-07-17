@@ -88,7 +88,7 @@ dependencies:
       # ASR is NVIDIA NeMo's Parakeet-TDT (streaming, word timestamps, no
       # external VAD needed). First run downloads the checkpoint (~2.4 GB)
       # to the HuggingFace cache. See TRANSCRIPTION.md.
-      - nemo_toolkit[asr]
+      - nemo_toolkit[asr]==2.7.3
 
       # ----- giftpose runtime: optional accelerated backends ---------------
       - onnx>=1.17

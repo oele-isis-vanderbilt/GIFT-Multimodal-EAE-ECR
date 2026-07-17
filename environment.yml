@@ -102,8 +102,11 @@ dependencies:
       # external VAD needed). ``[asr]`` hard-pins ``transformers~=4.57`` and
       # keeps torch>=2.6 (2.8 above is fine) and numpy>=2. First run downloads
       # ``nvidia/parakeet-tdt-0.6b-v2`` (~2.4 GB) to the HuggingFace cache.
+      # PINNED: an unpinned nemo lets pip's resolver backtrack to ancient
+      # releases (their numba==0.61 pin has no modern wheel and fails to
+      # build). 2.7.3 is the version validated on this project.
       # See TRANSCRIPTION.md.
-      - nemo_toolkit[asr]
+      - nemo_toolkit[asr]==2.7.3
 
       # ----- giftpose runtime: optional accelerated backends ---------------
       # ONNX Runtime delivers a large CPU speedup vs the PyTorch backend;
