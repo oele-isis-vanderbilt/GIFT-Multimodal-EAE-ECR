@@ -48,6 +48,14 @@ real-time streamer that carries internal state across chunks, so streamed
 denoising is smooth (no chunk-boundary artifacts). Only the transcription
 consumes denoised audio; saved videos keep the original track. Off by default.
 
+Install note: the `denoiser` package is a **post-step**, not in
+`environment.yml` — `pip install --no-deps denoiser==0.1.5`. Its metadata
+over-pins `hydra-core<1.1` (used only by its training CLI), which conflicts
+with NeMo's hydra 1.3.x; the inference path used here (`pretrained` +
+`DemucsStreamer`) needs only torch and runs fine alongside NeMo (verified).
+If the package is absent, `DenoiseSession` logs a warning and passes raw
+audio through — the pipeline never breaks.
+
 ## Config keys
 
 | Key | Default | Meaning |

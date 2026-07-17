@@ -98,7 +98,10 @@ dependencies:
       # - tensorrt
       # - onnxconverter-common
 
-      - denoiser
+      # FB Denoiser (optional): install post-create with
+      #   pip install --no-deps denoiser==0.1.5
+      # (its hydra-core<1.1 metadata pin conflicts with NeMo's hydra 1.3.x;
+      # the inference path used here needs only torch.)
 
       # ----- Analysis viewer (Tauri sidecar) --------------------------------
       - fastapi

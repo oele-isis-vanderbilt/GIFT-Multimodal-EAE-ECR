@@ -122,9 +122,14 @@ dependencies:
       # - tensorrt
       # - onnxconverter-common
 
-      # FB Denoiser — unpinned; the omegaconf>=2.3 pin above mitigates its
-      # legacy hydra-core transitive.
-      - denoiser
+      # FB Denoiser (optional ``enable_denoise`` pre-ASR pass) is installed in
+      # a post-step, NOT here: its metadata over-pins ``hydra-core<1.1`` (used
+      # only by its training CLI) which conflicts with NeMo's hydra 1.3.x and
+      # makes the single resolve impossible. The inference path we use
+      # (pretrained + DemucsStreamer) needs only torch. After env creation:
+      #
+      #   pip install --no-deps denoiser==0.1.5
+      #
 
       # ----- Analysis viewer (Tauri sidecar) --------------------------------
       # FastAPI sidecar serves the AnalysisSession JSON, video Range streams,

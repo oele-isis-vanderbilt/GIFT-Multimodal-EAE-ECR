@@ -29,6 +29,7 @@ cd GIFT-Multimodal-EAE-ECR
 conda env create --file environment.yml            # macOS / Linux
 conda env create --file environment.windows.yml    # Windows (Python stack from pip; conda only for python/git/ffmpeg/rust — avoids win-64 DLL clashes)
 conda activate gift-meae
+pip install --no-deps denoiser==0.1.5              # optional enable_denoise pre-ASR pass (post-step: its hydra-core<1.1 metadata conflicts with NeMo's hydra; inference needs only torch)
 ```
 
 > If `Solving environment` hangs:
