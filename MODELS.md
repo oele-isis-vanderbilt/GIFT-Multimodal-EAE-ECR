@@ -20,8 +20,7 @@ and export tooling; no new dependencies.
   "pose_backend": "body2d",          // "body2d" | "wholebody" | "pose3d"
   "pose_model_size": "x",            // size within the backend (see tables)
   "auto_download_models": false,      // fetch official checkpoints on demand
-  "pose_backend_weights": null,       // optional explicit weights override
-  "facing_metadata": true             // KGF facing sidecar (metadata only)
+  "pose_backend_weights": null        // optional explicit weights override
 }
 ```
 
@@ -111,22 +110,6 @@ change**. Score stays in column 2 of the canonical block everywhere; z is
 never interleaved. Extended data rides in optional per-object TrackerOutput
 fields (`keypoints_wb`, `keypoint_scores_wb`, `keypoints_z`) written only
 when the backend produces them.
-
-## Facing metadata (KGF)
-
-For every backend, a per-frame per-track facing estimate is computed from
-the canonical keypoints (`src/facing.py`, the KGF v2 estimator validated in
-the July 2026 study) and saved as **metadata only** — no overlay, metric, or
-analysis change:
-
-- `{basename}_FacingCache.txt`: `frame,id,yaw_cam,back,map_bearing,door_rel,conf`
-- per-object `facing: [yaw_cam, back, map_bearing, door_rel, conf]`
-
-`yaw_cam` is camera-relative (0 = toward camera). `map_bearing` is in map
-coordinates via the homography — **camera-placement invariant**. `door_rel`
-is the cosine against the door's inward normal (+1 = facing into the room,
-−1 = facing back out the door) — **invariant to camera-vs-door orientation**.
-Disable with `"facing_metadata": false`.
 
 ## Visualization policy (AAR)
 

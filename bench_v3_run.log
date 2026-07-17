@@ -1,0 +1,14 @@
+=== BENCH eae_original (12:00:07) ===
+--- done eae_original (12:02:51)
+bench configs written
+=== BENCH body2d_x_ft (12:02:51) ===
+--- done body2d_x_ft (12:05:17)
+=== BENCH body2d_t (12:05:17) ===
+--- done body2d_t (12:07:23)
+=== BENCH body2d_s (12:07:23) ===
+--- done body2d_s (12:09:31)
+=== BENCH body2d_m (12:09:31) ===
+--- done body2d_m (12:11:45)
+=== BENCH body2d_l (12:11:45) ===
+--- done body2d_l (12:13:58)
+=== BENCH wholebody_m (12:13:58) ===

@@ -46,7 +46,6 @@ from src.helper_functions import (
     tracking_with_clearance_overlay_spec,
 )
 
-from .facing import attach_facing_metadata, compute_facing, save_facing_cache
 from .metrics import *
 from .metrics._shared import load_door_axes
 from .metrics.context import MetricContext
@@ -1093,34 +1092,6 @@ class ProcessingEngine:
 
         save_position_cache(all_map_points, self.output_directory, self.video_basename)
         save_gaze_cache(gaze_info, self.output_directory, self.video_basename)
-
-        # ------------------------------------------------------------------
-        # KGF facing metadata (all pose backends; metadata only). Computed
-        # from the canonical Halpe-26 keypoints so it is backend-invariant;
-        # persisted as a sidecar cache + compact per-object field. Nothing
-        # in renderings, metrics or the analysis payload consumes it yet.
-        # ------------------------------------------------------------------
-        if bool(config.get("facing_metadata", True)):
-            try:
-                facing_door_axes = []
-                if self.boundary is not None and getattr(self, "entry_polys", None):
-                    try:
-                        facing_door_axes = load_door_axes(
-                            list(self.boundary.exterior.coords),
-                            [list(p.exterior.coords) for p in self.entry_polys],
-                        )
-                    except Exception:
-                        facing_door_axes = []
-                facing = compute_facing(
-                    tracker_output,
-                    fps=fps,
-                    pixel_mapper=self.mapper,
-                    door_axes=facing_door_axes,
-                )
-                attach_facing_metadata(tracker_output, facing)
-                save_facing_cache(facing, self.output_directory, self.video_basename)
-            except Exception:
-                logging.warning("Facing-metadata computation failed; continuing without it.", exc_info=True)
 
         preserve_audio_enabled = (
             bool(config.get("preserve_audio", True))

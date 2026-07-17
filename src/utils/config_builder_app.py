@@ -62,7 +62,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pose_backend": "body2d",
     "pose_model_size": "x",
     "auto_download_models": False,
-    "facing_metadata": True,
 
     # thresholds (advanced defaults)
     "box_conf_threshold": 0.3,
@@ -129,8 +128,6 @@ COMMENTS: Dict[str, str] = {
     "auto_download_models": "When true, official checkpoints for non-default sizes/backends are downloaded automatically into models/ on first use. The fine-tuned default weights are never downloaded.",
     "pose_backend_weights": "Optional explicit weights file for a non-default backend (e.g. a future fine-tuned RTMW checkpoint). Overrides the registry download.",
     "transcription_preroll_sec": "Seconds of audio included BEFORE the detected drill start when running the deferred transcription (default 5.0). Decouples WhisperX segmentation from few-frame shifts in entry detection so the transcript-derived drill end is stable; end candidates are still restricted to segments starting at/after the drill start. Set 0 to restore the exact-slice legacy behavior.",
-    "facing_metadata": "When true (default), per-frame per-track facing direction metadata (KGF estimator) is computed from the canonical keypoints and saved to {basename}_FacingCache.txt plus a compact per-object 'facing' field in TrackerOutput.json. Metadata only: no effect on metrics or renderings.",
-
     "box_conf_threshold": "Minimum bbox confidence to accept a detection.",
     "pose_conf_threshold": "Minimum keypoint confidence to accept pose keypoints and render gaze/triangles.",
     "flip_test": "When true, the pose model also runs on a horizontally-flipped copy of each crop and averages the two outputs (~0.5-1 px better keypoint accuracy on hard / occluded cases). Doubles the per-frame pose batch and roughly doubles pose forward time. Default false for speed; enable if accuracy matters more than fps.",

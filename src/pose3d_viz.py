@@ -220,18 +220,6 @@ def render_pose3d_plot_video(
                         tds = [q[1] for q in tr]
                         ax.plot(txs, tds, [floor] * len(tr),
                                 color=col, lw=1.4, alpha=0.45)
-                    # facing arrow on the floor (KGF metadata: camera-frame
-                    # yaw; 0 = toward camera = decreasing depth)
-                    facing = o.get("facing")
-                    if facing and facing[0] is not None:
-                        yaw = math.radians(float(facing[0]))
-                        ax_len = 0.10 * (x_hi - x_lo)
-                        ad_len = 0.14 * (z_hi - z_lo)
-                        ax.quiver(px, pd, floor,
-                                  math.sin(yaw) * ax_len,
-                                  -math.cos(yaw) * ad_len, 0.0,
-                                  color=col, lw=1.6, alpha=0.9,
-                                  arrow_length_ratio=0.35)
 
             present = sorted({int(o["id"]) for o in fr.get("objects", [])
                               if "keypoints_wb" in o and "keypoints_z" in o})
