@@ -37,6 +37,8 @@ class StreamingResult:
     last_audio_sec: float = 0.0        # how far into the audio we transcribed
     passes: int = 0                    # number of transcription passes
     elapsed_sec: float = 0.0
+    audio_start_sec: float = 0.0       # timeline offset of ``audio`` / segments
+    audio: Optional[np.ndarray] = None  # denoised buffer (only when denoising)
 
 
 def locate_drill_end_streaming(
@@ -96,8 +98,12 @@ def locate_drill_end_streaming(
         if audio_source is None:
             src.close()
         if denoise_session is not None:
+            # Drain the streamer's retained tail so the denoised buffer (kept
+            # as the ``_denoised.wav`` artifact) covers the full span read.
             try:
-                denoise_session.flush()
+                tail = denoise_session.flush()
+                if tail is not None and getattr(tail, "size", 0) > 0:
+                    buffer = tail if buffer is None else np.concatenate([buffer, tail])
             except Exception:
                 pass
 
@@ -110,4 +116,6 @@ def locate_drill_end_streaming(
         last_audio_sec=pos,
         passes=passes,
         elapsed_sec=clock() - t0,
+        audio_start_sec=audio_start,
+        audio=buffer if denoise_session is not None else None,
     )

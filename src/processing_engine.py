@@ -814,6 +814,26 @@ class ProcessingEngine:
                             pass
                 preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
                 start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
+                denoise_info = None
+                if denoise_session is not None and res.audio is not None and res.audio.size > 0:
+                    # Keep the denoised audio actually consumed by the ASR as a
+                    # verification artifact — it covers exactly the streamed span
+                    # [audio_start, last_audio_sec], not the whole video.
+                    wav_name = f"{self.video_basename}_denoised.wav"
+                    try:
+                        import soundfile as sf
+                        sf.write(
+                            os.path.join(self.output_directory, wav_name),
+                            res.audio, 16000, subtype="PCM_16",
+                        )
+                        denoise_info = {
+                            "model": "dns48",
+                            "dry": float(config.get("denoise_dry", 0.5)),
+                            "audio_artifact": wav_name,
+                            "start_sec": res.audio_start_sec,
+                        }
+                    except Exception:
+                        logging.warning("Failed to write denoised WAV artifact.", exc_info=True)
                 save_transcription_sidecar(
                     output_dir=self.output_directory,
                     video_basename=self.video_basename,
@@ -822,6 +842,7 @@ class ProcessingEngine:
                     language=config.get("transcription_language", "en"),
                     aligned=True,
                     audio_window={"start_sec": max(0.0, start_sec - max(0.0, preroll)), "end_sec": None},
+                    denoise=denoise_info,
                 )
                 end_locator_result["window"] = res.window
                 logging.info(
