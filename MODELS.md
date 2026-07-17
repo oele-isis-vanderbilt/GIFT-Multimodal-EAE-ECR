@@ -154,26 +154,28 @@ Notes:
   or 3D ever needs production quality; plug the result in via
   `pose_backend_weights`.
 
-## Measured on this Mac (Apple Silicon) — full-run benchmark, July 17 2026
+## Measured on this Mac (Apple Silicon) — merged pipeline, July 17 2026
 
-Pipeline loop fps (decode + detect + pose + track) and total wall time,
-test video 3-TrimmedV2 (2743 frames), PyTorch on MPS, idle machine.
+Test video 3-TrimmedV2, PyTorch on MPS, idle machine, streaming Parakeet
+drill-end + ``stop_at_drill_end`` active (each run stops at its detected
+drill end, ~1855 of 2743 frames — the production configuration).
 
-| Config | Loop fps | Wall (s) |
-|---|---|---|
-| original EAE (pre-branch code) | 23.4 | 158 |
-| body2d x (fine-tuned default) | 24.3 | 146 |
-| body2d l / m / s / t | 27.9 / 28.5 / 30.4 / 31.4 | 131 / 131 / 126 / 121 |
-| wholebody m / l / x | 19.8 / 18.9 / 17.5 | 173 / 181 / 191 |
-| pose3d l | 18.5 | 207 |
+| Config | EV / EH / TTE / SAW | Window | Loop fps | Wall (s) |
+|---|---|---|---|---|
+| default (fine-tuned x) | 1.0 / 1.0 / 1.0 / 0.93 | 1325–1855 | 26.1 | 103 |
+| body2d l / m / s / t | 1.0 / 1.0 / 1.0 / 0.92 · 0.88 · 0.71 · 0.83 | ±3 frames | 27.9 / 28.7 / 30.0 / 30.5 | 97 / 96 / 91 / 89 |
+| wholebody m / l / x | 1.0 / 1.0 / 1.0 / 0.92 · 0.91 · 0.91 | ±2 frames | 25.6 / 24.2 / 22.6 | 104 / 113 / 117 |
+| pose3d l | 1.0 / 1.0 / 1.0 / 0.91 | 1320–1855 | 24.0 | 149 (incl. 3D-plot video) |
 
-The branch default matches the original code's speed within noise. An
-earlier sweep (July 16, partially loaded machine — treat as relative only)
-showed TorchScript-MPS is the fastest deployment for most configs (pose3d
-roughly doubles) and ONNX-CPU runs at 2.7–6.6 fps. Zero-shot caveat: the
-biggest zero-shot models (wholebody-x, pose3d-l) degrade tracking-derived
-metric scores on full-length runs of this footage — fine-tuning via
-``pose_backend_weights`` is the production path for them.
+All ten configurations detect the drill end within 4 frames (~0.07 s) of
+each other — the streaming ASR end is stable across pose models (window
+*starts* differ a few frames because entry detection genuinely depends on
+the pose model). Entry metrics are full-score for every config: stopping at
+the drill end removes the post-drill track fragments that previously stole
+entry slots from the biggest zero-shot models. STAY_ALONG_WALL now cleanly
+ranks keypoint quality (fine-tuned x best at 0.93; zero-shot s weakest at
+0.71). Fine-tuning via ``pose_backend_weights`` remains the production path
+for the zero-shot backends.
 
 ## Regression guarantees
 
