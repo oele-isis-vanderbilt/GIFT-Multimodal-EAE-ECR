@@ -105,6 +105,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "transcription_device": "cpu",
     "enable_denoise": False,
     "denoise_device": "cpu",
+    "asr_backend": "parakeet",
+    "asr_streaming": True,
+    "asr_stream_chunk_sec": 8.0,
+    "asr_stream_confirm_sec": 3.0,
     # drill window auto-detection (advanced defaults)
     "drill_window_enabled": True,
     "drill_window_required_words": "room,clear",
@@ -165,6 +169,10 @@ COMMENTS: Dict[str, str] = {
     "denoise_device": "Compute device for FB Denoiser. cpu or cuda only — Demucs's internal conv1d exceeds the MPS 65536-output-channel kernel limit; if mps is set the denoiser auto-falls-back to cpu with a warning. Independent of transcription_device. Ignored when enable_denoise is false.",
     "drill_window_enabled": "When true, enables auto-detection of drill start (first tracker entry crossing) and drill end (latest transcript segment containing every word in drill_window_required_words). All metrics, artifact videos, and audio are trimmed to the detected window. Defer + slice transcription so WhisperX only processes the post-entry audio. Default true.",
     "stop_at_drill_end": "When true (default), transcription runs in a background thread as soon as the first entry is detected; the frame loop stops as soon as the located drill-end frame is reached, skipping post-drill footage (faster, and prevents post-drill track fragments from being mistaken for entrants). If no drill end can be identified (no matching transcript segment), processing continues to the video end unchanged. Requires drill_window_enabled and enable_transcription; ignored otherwise. Set false to always process the full video.",
+    "asr_backend": "Speech-to-text engine: 'parakeet' (default, NeMo Parakeet-TDT — streaming, fast, accurate) or 'whisperx' (legacy, transitional). Parakeet falls back to whisperx automatically if NeMo is unavailable.",
+    "asr_streaming": "When true (default), the drill-end transcription runs forward-chunked and stops as soon as the 'room clear' phrase is confirmed (stream-compatible, no wasted tail, robust to a mid-conversation cut). Set false to use the legacy single-pass batch transcription of the whole post-entry audio.",
+    "asr_stream_chunk_sec": "Streaming ASR: seconds of audio added per forward chunk before re-checking for the drill-end phrase (default 8.0). Smaller = finer granularity, more transcription passes.",
+    "asr_stream_confirm_sec": "Streaming ASR: shorter chunk (default 3.0s) read once a tentative 'room clear' appears, to confirm it via a second consecutive pass (LocalAgreement) while minimizing how far past the end we transcribe.",
     "drill_window_required_words": "Comma-separated list of words that must all appear in a transcript segment for it to qualify as the drill-end callout. Order doesn't matter, fillers between are fine, and matching is lowercase + punctuation-stripped. Default 'room,clear'.",
 
     # UI-only

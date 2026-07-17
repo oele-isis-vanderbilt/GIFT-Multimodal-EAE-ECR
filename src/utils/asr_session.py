@@ -167,8 +167,14 @@ def build_session(backend: str, config: Optional[Dict[str, Any]] = None) -> Tran
     falls back to WhisperX so the pipeline never breaks."""
     backend = (backend or "whisperx").lower()
     if backend == "parakeet":
+        # Probe NeMo up front so an environment without it cleanly falls back
+        # to WhisperX here (NeMo is imported lazily inside ParakeetSession.load,
+        # so a bare import of the class would not surface the missing dep).
         try:
-            from .asr_parakeet import ParakeetSession  # added in Phase 2
+            import importlib.util
+            if importlib.util.find_spec("nemo") is None:
+                raise ImportError("nemo not installed")
+            from .asr_parakeet import ParakeetSession
             return ParakeetSession(config)
         except Exception:
             logger.warning("Parakeet backend unavailable; falling back to WhisperX.", exc_info=True)

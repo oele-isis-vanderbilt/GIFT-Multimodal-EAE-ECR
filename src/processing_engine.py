@@ -821,7 +821,7 @@ class ProcessingEngine:
             # Transcription.json sidecar from the accumulated segments.
             from .utils.asr_session import build_session
             from .utils.drill_stream import locate_drill_end_streaming
-            session = build_session(config.get("asr_backend", "whisperx"), config)
+            session = build_session(config.get("asr_backend", "parakeet"), config)
             denoise_session = None
             if bool(config.get("enable_denoise", False)):
                 try:
@@ -857,7 +857,7 @@ class ProcessingEngine:
                 output_dir=self.output_directory,
                 video_basename=self.video_basename,
                 segments=res.segments,
-                model=str(config.get("asr_backend", "whisperx")),
+                model=str(config.get("asr_backend", "parakeet")),
                 language=config.get("transcription_language", "en"),
                 aligned=True,
                 audio_window={"start_sec": max(0.0, start_sec - max(0.0, preroll)), "end_sec": None},
