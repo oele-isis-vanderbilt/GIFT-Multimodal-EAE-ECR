@@ -171,13 +171,24 @@ Notes:
   or 3D ever needs production quality; plug the result in via
   `pose_backend_weights`.
 
-## Measured on this Mac (MPS, Apple Silicon) — updated by the final sweep
+## Measured on this Mac (Apple Silicon) — full-benchmark, July 16 2026
 
-| Backend | Model | Approx. pose throughput |
-|---|---|---|
-| body2d x (default) | fine-tuned RTMPose-x | baseline (full E2E ≈ 2.4 fps video incl. detection/tracking) |
-| wholebody x | RTMW-x | ~18–27 persons/s (≈ 4–5 video-fps at 5 people/frame) |
-| pose3d l | RTMW3D-l | PyTorch backend; between wholebody-x and body2d-x per person |
+Pipeline loop fps (decode + detect + pose + track), test video 3-TrimmedV2.
+PyTorch/TorchScript on MPS; ONNX on CPU (autoselect skips ONNX on MPS).
+
+| Config | PyTorch-MPS | TorchScript-MPS | ONNX-CPU |
+|---|---|---|---|
+| body2d x (fine-tuned default) | 10.0 | 11.3 | 3.6 |
+| body2d l / m / s / t | 21.0 / 22.9 / 20.6 / 12.9 | 23.7 / 25.3 / 26.7 / 13.8 | 5.3 / 5.9 / 6.5 / 6.6 |
+| wholebody m / l / x | 18.9 / 16.7 / 10.4 | 11.6 / 9.4 / 9.3 | 5.2 / 3.4 / 2.7 |
+| pose3d l | 8.9 | 17.9 | 3.4 |
+
+Original EAE (pre-branch code, default config): 9.7 fps — the branch default
+matches it within noise and reproduces its metric scores exactly.
+TorchScript-MPS is the fastest deployment for most configs. Zero-shot
+caveat: the biggest zero-shot models (wholebody-x, pose3d-l) degrade
+tracking-derived metric scores on full-length runs of this footage —
+fine-tuning via ``pose_backend_weights`` is the production path for them.
 
 ## Regression guarantees
 
