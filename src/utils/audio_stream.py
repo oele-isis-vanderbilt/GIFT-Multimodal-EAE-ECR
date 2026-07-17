@@ -120,7 +120,7 @@ class ArrayAudioChunkSource(AudioChunkSource):
 def _load_wav_mono_f32(path: str) -> Optional[np.ndarray]:
     """Load a 16-bit PCM WAV as float32 mono in [-1, 1] without extra deps."""
     try:
-        import soundfile as sf  # bundled via pyannote/denoiser deps
+        import soundfile as sf  # pinned in environment.yml (WAV I/O)
         data, _ = sf.read(path, dtype="float32", always_2d=False)
         if data.ndim > 1:
             data = data.mean(axis=1)

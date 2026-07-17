@@ -25,12 +25,12 @@ dependencies:
   - python=3.11
   - pip
   - git
-  - ffmpeg                # CLI binary whisperx shells out to (no pip equivalent)
+  - ffmpeg                # CLI binary for audio extraction (no pip equivalent)
   - conda-forge::rust     # Tauri 2 toolchain, rustc >= 1.77 (no pip equivalent)
 
   - pip:
-      # libs/Track imports pkg_resources, dropped by setuptools 75+.
-      - setuptools<75
+      # libs/Track imports pkg_resources, removed by setuptools 81.
+      - setuptools<81
 
       # CA bundle for HTTPS downloads (see src/utils/certs.py); transitive, but
       # pinned so the cert-store workaround is guaranteed.
@@ -57,8 +57,8 @@ dependencies:
 
       # ----- Deep-learning runtime ------------------------------------------
       # PyPI's default Windows wheels are CPU; see the README "CUDA users"
-      # section to install matching cu### wheels. Pinned to match whisperx
-      # 3.7.4 + pyannote.audio 3.4.0 (pyannote requires torch==2.8.0).
+      # section to install matching cu### wheels. torch 2.8 satisfies NeMo's
+      # ``torch>=2.6`` (the ASR engine below) without an upgrade.
       - torch==2.8.0
       - torchvision==0.23.0
       - torchaudio==2.8.0
@@ -74,8 +74,8 @@ dependencies:
       - regex
       - cython
 
-      # Modern omegaconf — denoiser's hydra-core can pull legacy 1.4 which
-      # breaks pyannote.audio's pickled VAD load.
+      # Modern omegaconf — denoiser's hydra-core can pull the legacy 1.4
+      # series, which conflicts with NeMo's hydra/omegaconf requirements.
       - omegaconf>=2.3
 
       # Needed by torch>=2.5's dynamo torch.onnx.export (onnx_export.py).
@@ -84,9 +84,11 @@ dependencies:
       # WAV I/O for src/utils/denoise.py (avoids torchaudio>=2.8 torchcodec).
       - soundfile
 
-      # ----- Audio / transcription -----------------------------------------
-      - whisperx==3.7.4
-      - pyannote.audio==3.4.0
+      # ----- Audio / transcription (NeMo Parakeet) -------------------------
+      # ASR is NVIDIA NeMo's Parakeet-TDT (streaming, word timestamps, no
+      # external VAD needed). First run downloads the checkpoint (~2.4 GB)
+      # to the HuggingFace cache. See TRANSCRIPTION.md.
+      - nemo_toolkit[asr]
 
       # ----- giftpose runtime: optional accelerated backends ---------------
       - onnx>=1.17

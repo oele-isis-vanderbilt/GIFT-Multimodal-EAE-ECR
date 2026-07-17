@@ -1,13 +1,13 @@
 """NeMo Parakeet ASR session for streaming drill-end detection.
 
 Wraps ``nvidia/parakeet-tdt-0.6b-v2`` (an ``EncDecRNNTBPEModel``) behind the
-same :class:`TranscriptionSession` contract as the WhisperX path: load once,
+:class:`TranscriptionSession` contract: load once,
 ``transcribe_audio(np_16k_mono, offset_sec)`` returns segments in the canonical
 ``{start, end, text, words:[{word, start, end, score}]}`` schema with
 timestamps offset to the original-video timeline.
 
 Parakeet emits word- and segment-level timestamps directly (no separate
-alignment model). It has no wav2vec2-style per-word confidence, so ``score``
+alignment model). It provides no per-word confidence, so ``score``
 is ``None`` — the drill-end gate is lenient with ``None`` (word-presence is
 the primary rule) and the LocalAgreement-2 confirmation guards against
 transient mis-hearings.

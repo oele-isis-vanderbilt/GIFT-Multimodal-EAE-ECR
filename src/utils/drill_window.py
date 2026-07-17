@@ -16,8 +16,8 @@ on only the actual drill segment rather than the full source video.
                  regardless of score.
 
 Design choices:
-* No new ML model. WhisperX already ships word-level timestamps + a
-  forced-alignment ``score`` per word; that's all we need.
+* No new ML model. The ASR already ships segment/word-level timestamps
+  (and, when available, a per-word ``score``); that's all we need.
 * No diarization. We can't know which speaker is the leader, so it
   wouldn't actually disambiguate. Instead the word-presence rule plus
   "pick the latest qualifier" handles teammate exclamations.
@@ -44,7 +44,7 @@ DEFAULT_REQUIRED_WORDS = "room,clear"
 DEFAULT_MIN_ALIGN_SCORE = 0.4   # lenient — mostly trust the word-presence rule
 
 # Punctuation stripping: keep apostrophes inside words (e.g. "don't") but
-# drop everything else. WhisperX includes punctuation glued to tokens.
+# drop everything else. ASR output includes punctuation glued to tokens.
 _PUNCT_RE = re.compile(r"[^a-z0-9'\s]")
 
 

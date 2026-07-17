@@ -86,7 +86,7 @@ dependencies:
       - certifi
 
       # Force modern omegaconf — denoiser's transitive hydra-core can pull
-      # the legacy 1.4 series, which breaks pyannote.audio's pickled VAD load.
+      # the legacy 1.4 series, which conflicts with NeMo's hydra/omegaconf.
       - omegaconf>=2.3
 
       # Required by torch>=2.5's dynamo-based ``torch.onnx.export`` codepath

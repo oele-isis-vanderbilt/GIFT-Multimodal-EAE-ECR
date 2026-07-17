@@ -141,7 +141,7 @@ def extract_audio_to_wav(
     ``-ss`` and ``-to`` are placed before ``-i`` for fast seek and exact-end
     semantics. Default output is 48 kHz, 16-bit PCM, stereo; set
     ``sample_rate`` / ``channels`` to override (the transcription pipeline
-    feeds whisperx 16 kHz mono, for example). Returns True on success.
+    feeds the ASR 16 kHz mono, for example). Returns True on success.
     """
     if not source_video or not os.path.exists(source_video):
         return False
