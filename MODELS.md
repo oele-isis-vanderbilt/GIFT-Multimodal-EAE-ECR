@@ -154,30 +154,39 @@ Notes:
   or 3D ever needs production quality; plug the result in via
   `pose_backend_weights`.
 
-## Measured on this Mac (Apple Silicon) — full-benchmark, July 16 2026
+## Measured on this Mac (Apple Silicon) — full-run benchmark, July 17 2026
 
-Pipeline loop fps (decode + detect + pose + track), test video 3-TrimmedV2.
-PyTorch/TorchScript on MPS; ONNX on CPU (autoselect skips ONNX on MPS).
+Pipeline loop fps (decode + detect + pose + track) and total wall time,
+test video 3-TrimmedV2 (2743 frames), PyTorch on MPS, idle machine.
 
-| Config | PyTorch-MPS | TorchScript-MPS | ONNX-CPU |
-|---|---|---|---|
-| body2d x (fine-tuned default) | 10.0 | 11.3 | 3.6 |
-| body2d l / m / s / t | 21.0 / 22.9 / 20.6 / 12.9 | 23.7 / 25.3 / 26.7 / 13.8 | 5.3 / 5.9 / 6.5 / 6.6 |
-| wholebody m / l / x | 18.9 / 16.7 / 10.4 | 11.6 / 9.4 / 9.3 | 5.2 / 3.4 / 2.7 |
-| pose3d l | 8.9 | 17.9 | 3.4 |
+| Config | Loop fps | Wall (s) |
+|---|---|---|
+| original EAE (pre-branch code) | 23.4 | 158 |
+| body2d x (fine-tuned default) | 24.3 | 146 |
+| body2d l / m / s / t | 27.9 / 28.5 / 30.4 / 31.4 | 131 / 131 / 126 / 121 |
+| wholebody m / l / x | 19.8 / 18.9 / 17.5 | 173 / 181 / 191 |
+| pose3d l | 18.5 | 207 |
 
-Original EAE (pre-branch code, default config): 9.7 fps — the branch default
-matches it within noise and reproduces its metric scores exactly.
-TorchScript-MPS is the fastest deployment for most configs. Zero-shot
-caveat: the biggest zero-shot models (wholebody-x, pose3d-l) degrade
-tracking-derived metric scores on full-length runs of this footage —
-fine-tuning via ``pose_backend_weights`` is the production path for them.
+The branch default matches the original code's speed within noise. An
+earlier sweep (July 16, partially loaded machine — treat as relative only)
+showed TorchScript-MPS is the fastest deployment for most configs (pose3d
+roughly doubles) and ONNX-CPU runs at 2.7–6.6 fps. Zero-shot caveat: the
+biggest zero-shot models (wholebody-x, pose3d-l) degrade tracking-derived
+metric scores on full-length runs of this footage — fine-tuning via
+``pose_backend_weights`` is the production path for them.
 
 ## Regression guarantees
 
 The default configuration is regression-gated: engine runs on
-`input/test.vmeta.xml` must reproduce the frozen baseline metric scores
+`input/test.vmeta.xml` must reproduce the frozen baseline
 (ENTRANCE_VECTORS 1.0, ENTRANCE_HESITATION 1.0, TOTAL_TIME_OF_ENTRY 1.0,
-STAY_ALONG_WALL 0.93 at the baseline commit) with identical tracking output.
-Every non-default backend is smoke-gated end-to-end (engine → tracker →
-metrics → overlays → viewer-loadable run folder).
+STAY_ALONG_WALL 0.90, drill window 1325–1725) with identical tracking
+output. Note: the pre-branch code scores 0.93 with window 1325–1885 on the
+same video — the difference is `transcription_preroll_sec` (the 5 s audio
+pre-roll makes WhisperX segment "First room is clear." as its own utterance
+ending at 28.3 s, instead of merging it with "proceeding to the next room"
+through 30.9 s; the tighter, more faithful drill end shortens the window and
+shifts STAY_ALONG_WALL). Set `"transcription_preroll_sec": 0` to reproduce
+the legacy window and score exactly. Every non-default backend is
+smoke-gated end-to-end (engine → tracker → metrics → overlays →
+viewer-loadable run folder).
