@@ -154,39 +154,8 @@ Notes:
   or 3D ever needs production quality; plug the result in via
   `pose_backend_weights`.
 
-## Measured on this Mac (Apple Silicon) — merged pipeline, July 17 2026
-
-Test video 3-TrimmedV2, PyTorch on MPS, idle machine, streaming Parakeet
-drill-end + ``stop_at_drill_end`` active (each run stops at its detected
-drill end, ~1855 of 2743 frames — the production configuration).
-
-| Config | EV / EH / TTE / SAW | Window | Loop fps | Wall (s) |
-|---|---|---|---|---|
-| default (fine-tuned x) | 1.0 / 1.0 / 1.0 / 0.93 | 1325–1855 | 26.1 | 103 |
-| body2d l / m / s / t | 1.0 / 1.0 / 1.0 / 0.92 · 0.88 · 0.71 · 0.83 | ±3 frames | 27.9 / 28.7 / 30.0 / 30.5 | 97 / 96 / 91 / 89 |
-| wholebody m / l / x | 1.0 / 1.0 / 1.0 / 0.92 · 0.91 · 0.91 | ±2 frames | 25.6 / 24.2 / 22.6 | 104 / 113 / 117 |
-| pose3d l | 1.0 / 1.0 / 1.0 / 0.91 | 1320–1855 | 24.0 | 149 (incl. 3D-plot video) |
-
-All ten configurations detect the drill end within 4 frames (~0.07 s) of
-each other — the streaming ASR end is stable across pose models (window
-*starts* differ a few frames because entry detection genuinely depends on
-the pose model). Entry metrics are full-score for every config: stopping at
-the drill end removes the post-drill track fragments that previously stole
-entry slots from the biggest zero-shot models. STAY_ALONG_WALL now cleanly
-ranks keypoint quality (fine-tuned x best at 0.93; zero-shot s weakest at
-0.71). Fine-tuning via ``pose_backend_weights`` remains the production path
-for the zero-shot backends.
-
-## Regression guarantees
-
-The default configuration is regression-gated: engine runs on
-`input/test.vmeta.xml` must reproduce the frozen baseline
-(ENTRANCE_VECTORS 1.0, ENTRANCE_HESITATION 1.0, TOTAL_TIME_OF_ENTRY 1.0,
-STAY_ALONG_WALL 0.93, drill window 1325–1855) with identical tracking
-output — matching the original pre-branch pipeline. The streaming Parakeet
-ASR (see [TRANSCRIPTION.md](TRANSCRIPTION.md)) lands the drill end at the
-natural sentence boundary ("First room is clear, proceed in the next room",
-~30.4 s); the exact end frame may vary ±0.5 s with the ASR's word alignment
-without affecting the metric scores. Every non-default backend is smoke-gated
-end-to-end (engine → tracker → metrics → overlays → viewer-loadable run
-folder).
+Relative speed on typical hardware: smaller `body2d` sizes are the fastest,
+the fine-tuned default runs comfortably in real-time-adjacent territory,
+`wholebody` costs roughly 10–20% more than the default, and `pose3d` is the
+slowest (plus its extra 3D-plot artifact). Speech transcription is documented
+separately in [TRANSCRIPTION.md](TRANSCRIPTION.md).

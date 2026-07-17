@@ -43,3 +43,6 @@ DESCRIPTION.md
 
 # Local export/test artifacts produced in the pose-backends worktree
 /export_artifacts/
+
+# Stray run logs at repo root (bench/debug runs)
+/*.log
