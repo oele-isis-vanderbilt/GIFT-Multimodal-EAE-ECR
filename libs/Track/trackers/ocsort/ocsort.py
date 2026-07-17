@@ -776,6 +776,7 @@ class OCSort(BaseTracker):
         pose_min_affinity: float = 0.10,
         keypoint_mean_conf_threshold: Optional[float] = None,
         max_obs: int = 50,
+        duplicate_birth_ioa: Optional[float] = None,
     ):
         super().__init__(max_age=max_age, class_id_to_label=class_id_to_label)
 
@@ -785,6 +786,12 @@ class OCSort(BaseTracker):
         self.asso_threshold = asso_threshold
         self.frame_count = 0
         self.det_thresh = det_thresh
+        # Duplicate-birth guard: refuse to birth a track from an unmatched
+        # detection contained (IoA >= this) in a track matched this frame.
+        # None disables (library default; the engine opts in explicitly).
+        self.duplicate_birth_ioa = (
+            float(duplicate_birth_ioa) if duplicate_birth_ioa is not None else None
+        )
         self.delta_t = delta_t
         self.asso_func = get_asso_func(asso_func)
         self.inertia = inertia
@@ -1407,6 +1414,41 @@ class OCSort(BaseTracker):
 
         return create_track
 
+    def _is_duplicate_of_matched_track(self, det_xyxy: np.ndarray) -> bool:
+        """True when ``det_xyxy`` lies almost entirely on a person who already
+        has a track matched this frame.
+
+        Guards track birth against duplicate detections: a partially occluded
+        person can yield two boxes of different extents (e.g. torso-only +
+        full-body) whose mutual IoU passes detector NMS, leaving the surplus
+        box unmatched — without this check it would be born as a rival track
+        that then steals the identity. Containment (intersection over the
+        smaller box's area) is used instead of IoU because the duplicate pair
+        differs precisely in extent. Genuine new entrants are unaffected: a
+        real person does not materialize ~fully inside an already-claimed box.
+        """
+        if self.duplicate_birth_ioa is None or self.duplicate_birth_ioa >= 1.0:
+            return False
+        dx1, dy1, dx2, dy2 = (float(v) for v in det_xyxy[:4])
+        det_area = max(0.0, dx2 - dx1) * max(0.0, dy2 - dy1)
+        if det_area <= 0:
+            return False
+        for track in self.active_tracks:
+            if track.time_since_update != 0 or track.last_observation.sum() < 0:
+                continue
+            tx1, ty1, tx2, ty2 = (float(v) for v in track.last_observation[:4])
+            trk_area = max(0.0, tx2 - tx1) * max(0.0, ty2 - ty1)
+            if trk_area <= 0:
+                continue
+            iw = min(dx2, tx2) - max(dx1, tx1)
+            ih = min(dy2, ty2) - max(dy1, ty1)
+            if iw <= 0 or ih <= 0:
+                continue
+            ioa = (iw * ih) / min(det_area, trk_area)
+            if ioa >= self.duplicate_birth_ioa:
+                return True
+        return False
+
     def _create_new_tracks(
         self,
         unmatched_detection_indices: np.ndarray,
@@ -1419,6 +1461,8 @@ class OCSort(BaseTracker):
             return
 
         for detection_index in unmatched_detection_indices:
+            if self._is_duplicate_of_matched_track(detections[detection_index, 0:4]):
+                continue
             detection_keypoints = (
                 primary_keypoints[detection_index]
                 if primary_keypoints is not None

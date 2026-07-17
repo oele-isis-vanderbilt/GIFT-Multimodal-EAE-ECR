@@ -473,6 +473,12 @@ class ProcessingEngine:
             boundary_pad_pct=self.config.get("boundary_pad_pct", 0.05),
             track_enemy=self.config.get("track_enemy", True),
             entry_conf_threshold=0.3,
+            # Duplicate-birth guard: a half-occluded person can yield two
+            # differently-sized boxes (torso-only + full-body) whose mutual
+            # IoU passes detector NMS; the surplus unmatched box must not be
+            # born as a rival track that steals the identity. Fixed value,
+            # deliberately not config-exposed.
+            duplicate_birth_ioa=0.9,
         )
 
         self.box_conf_threshold = self.config.get("box_conf_threshold", 0.3)
