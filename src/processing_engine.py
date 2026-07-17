@@ -63,7 +63,7 @@ from .utils.drill_window import (
 )
 from .utils.torch_memory import free_torch_memory
 from .utils.transcode import transcode
-from .utils.transcription import save_transcription_sidecar, transcribe_video
+from .utils.transcription import save_transcription_sidecar
 from .utils.video import count_video_frames, get_video_framerate
 from .utils.vmeta import generate_vmeta
 
@@ -696,74 +696,53 @@ class ProcessingEngine:
         drill_window_enabled = bool(config.get("drill_window_enabled", True))
         enable_transcription = bool(config.get("enable_transcription", False))
 
-        def _invoke_transcribe(
-            audio_start_sec: Optional[float] = None,
-            cfg: Dict = config,
-            out_dir: str = self.output_directory,
-            basename: str = self.video_basename,
-        ) -> None:
-            """Run whisperx with the project's standard args.
+        def _transcribe_full_audio() -> None:
+            """One-shot Parakeet transcription of the whole audio.
 
-            Layer-1 toggles come from config; Layer-2 expert knobs are pinned
-            here so all tuning happens in one place. ``audio_start_sec`` lets
-            the deferred path transcribe only the post-entry slice. The dict-
-            and string-typed bindings are captured via default args so that
-            pyright preserves narrowing across the closure boundary.
+            Used only when drill-window detection is OFF (there is no drill end
+            to locate); runs in parallel with the pose loop and writes the
+            standard Transcription.json sidecar. When drill-window detection is
+            ON, transcription is instead driven by the streaming drill-end
+            locator below.
             """
             try:
-                transcribe_video(
-                    source_video_path=cfg["video_path"],
-                    output_dir=out_dir,
-                    video_basename=basename,
-                    # === Config-exposed (Layer 1) — only the toggles + device ===
-                    device=cfg.get("transcription_device", "cpu"),
-                    denoise_model=(
-                        "dns48" if cfg.get("enable_denoise", False) else None
-                    ),
-                    denoise_device=cfg.get("denoise_device"),
-                    # === Drill-window slice ===
-                    audio_start_sec=audio_start_sec,
-                    # === Hardcoded developer defaults (Layer 2) ===
-                    model="large-v2",
-                    language="en",
-                    compute_type=None,
-                    batch_size=16,
-                    beam_size=5,
-                    temperature=0.0,
-                    temperature_increment_on_fallback=0.2,
-                    compression_ratio_threshold=2.4,
-                    logprob_threshold=-1.0,
-                    no_speech_threshold=0.6,
-                    condition_on_previous_text=False,
-                    suppress_numerals=False,
-                    initial_prompt=None,
-                    hotwords=None,
-                    vad_method="pyannote",
-                    vad_onset=0.7,
-                    vad_offset=0.363,
-                    chunk_size=30,
-                    run_alignment=True,
-                    return_char_alignments=False,
-                    interpolate_method="nearest",
-                    threads=4,
-                    denoise_dry=0.5,
-                    keep_denoised_wav=True,
+                from .utils.asr_session import build_session
+                from .utils.audio_stream import FileAudioChunkSource
+                session = build_session(config)
+                segments: List[Dict[str, Any]] = []
+                try:
+                    src = FileAudioChunkSource(config["video_path"])
+                    buf: List[np.ndarray] = []
+                    pos = 0.0
+                    while True:
+                        chunk = src.read(pos, 30.0)
+                        if chunk is None:
+                            break
+                        buf.append(chunk)
+                        pos += 30.0
+                    src.close()
+                    if buf:
+                        segments = session.transcribe_audio(np.concatenate(buf), offset_sec=0.0)
+                finally:
+                    session.close()
+                save_transcription_sidecar(
+                    output_dir=self.output_directory,
+                    video_basename=self.video_basename,
+                    segments=segments,
+                    model=str(config.get("asr_backend", "parakeet")),
+                    language=config.get("transcription_language", "en"),
+                    aligned=True,
                 )
             except Exception:
-                logging.exception("Transcription failed; pipeline continuing.")
+                logging.exception("Full-audio transcription failed; pipeline continuing.")
 
-        # Legacy parallel-thread mode: drill-window detection is OFF so we
-        # have no reason to defer transcription. Thread joins later, before
-        # metric scoring.
         transcription_thread: Optional[threading.Thread] = None
         if enable_transcription and not drill_window_enabled:
             transcription_thread = threading.Thread(
-                target=_invoke_transcribe,
-                name="transcription",
-                daemon=False,
+                target=_transcribe_full_audio, name="transcription", daemon=False,
             )
             transcription_thread.start()
-            logging.info("Started transcription thread (parallel with pose pipeline)")
+            logging.info("Started full-audio transcription thread (drill window off).")
 
         tracker_output: List[dict] = []
         all_map_points: List[list] = []
@@ -781,108 +760,79 @@ class ProcessingEngine:
         max_after_entry = int(max_after_entry) if max_after_entry else None
         first_entry_frame_live: Optional[int] = None
 
-        # Stop-at-drill-end: once the tracker confirms the first entry, the
-        # audio slice is fully determined, so transcription + drill-end
-        # location run in a background thread while the frame loop continues.
-        # As soon as the located end frame is reached (or already passed),
-        # the loop stops — post-drill footage adds nothing downstream (all
-        # artifacts and metrics are drill-window-scoped). If no end can be
-        # identified (no transcript match), processing continues to the video
-        # end exactly as before. Disable with ``stop_at_drill_end: false``.
-        stop_at_end = (
-            bool(config.get("stop_at_drill_end", True))
-            and drill_window_enabled
-            and enable_transcription
-        )
+        # Drill-end location: once the tracker confirms the first entry, a
+        # background thread streams forward-chunked Parakeet transcription to
+        # find the drill end. If ``stop_at_drill_end`` (default), the frame
+        # loop stops as soon as that end is reached — post-drill footage adds
+        # nothing downstream (all artifacts and metrics are drill-window
+        # scoped). If no end can be identified (no transcript match), or the
+        # option is off, processing continues to the video end.
+        run_locator = enable_transcription and drill_window_enabled
+        stop_at_end = bool(config.get("stop_at_drill_end", True)) and run_locator
         fps_cfg = float(config.get("frame_rate", 30.0) or 30.0)
         end_locator_thread: Optional[threading.Thread] = None
         end_locator_result: Dict[str, Any] = {}
         end_locator_done = threading.Event()
 
-        use_streaming_asr = bool(config.get("asr_streaming", True))
-
         def _locate_drill_end(entry_frame: int) -> None:
+            # Loads the ASR model once and transcribes only up to ~one
+            # confirmation chunk past the drill end (never to EOF), then writes
+            # the standard Transcription.json sidecar from the accumulated
+            # segments. Runs in a background thread from first entry.
             try:
-                if use_streaming_asr:
-                    _locate_drill_end_streaming(entry_frame)
-                else:
-                    _locate_drill_end_batch(entry_frame)
-            except Exception:
-                logging.exception(
-                    "Drill-end location failed; processing continues to video end."
+                from .utils.asr_session import build_session
+                from .utils.drill_stream import locate_drill_end_streaming
+                session = build_session(config)
+                denoise_session = None
+                if bool(config.get("enable_denoise", False)):
+                    try:
+                        from .utils.denoise import DenoiseSession
+                        denoise_session = DenoiseSession(
+                            model_name="dns48",
+                            dry=float(config.get("denoise_dry", 0.5)),
+                            device=config.get("denoise_device") or config.get("transcription_device", "cpu"),
+                        )
+                    except Exception:
+                        logging.warning("Denoise session init failed; continuing without denoise.", exc_info=True)
+                        denoise_session = None
+                try:
+                    res = locate_drill_end_streaming(
+                        source_path=config["video_path"],
+                        drill_start_frame=entry_frame,
+                        fps=fps_cfg,
+                        frame_total=frame_total,
+                        config=config,
+                        session=session,
+                        denoise_session=denoise_session,
+                    )
+                finally:
+                    session.close()
+                    if denoise_session is not None:
+                        try:
+                            denoise_session.close()
+                        except Exception:
+                            pass
+                preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
+                start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
+                save_transcription_sidecar(
+                    output_dir=self.output_directory,
+                    video_basename=self.video_basename,
+                    segments=res.segments,
+                    model=str(config.get("asr_backend", "parakeet")),
+                    language=config.get("transcription_language", "en"),
+                    aligned=True,
+                    audio_window={"start_sec": max(0.0, start_sec - max(0.0, preroll)), "end_sec": None},
                 )
+                end_locator_result["window"] = res.window
+                logging.info(
+                    "Streaming drill-end: end_frame=%s reason=%s (%.1fs audio, %d passes, %.1fs).",
+                    res.window.end_frame, res.window.decision_reason,
+                    res.last_audio_sec, res.passes, res.elapsed_sec,
+                )
+            except Exception:
+                logging.exception("Drill-end location failed; processing continues to video end.")
             finally:
                 end_locator_done.set()
-
-        def _locate_drill_end_streaming(entry_frame: int) -> None:
-            # Forward-chunked, stop-at-confirmed-end transcription. Loads the
-            # ASR model once and transcribes only up to ~one confirmation chunk
-            # past the drill end (never to EOF), then writes the standard
-            # Transcription.json sidecar from the accumulated segments.
-            from .utils.asr_session import build_session
-            from .utils.drill_stream import locate_drill_end_streaming
-            session = build_session(config.get("asr_backend", "parakeet"), config)
-            denoise_session = None
-            if bool(config.get("enable_denoise", False)):
-                try:
-                    from .utils.denoise import DenoiseSession
-                    denoise_session = DenoiseSession(
-                        model_name="dns48",
-                        dry=float(config.get("denoise_dry", 0.5)),
-                        device=config.get("denoise_device") or config.get("transcription_device", "cpu"),
-                    )
-                except Exception:
-                    logging.warning("Denoise session init failed; continuing without denoise.", exc_info=True)
-                    denoise_session = None
-            try:
-                res = locate_drill_end_streaming(
-                    source_path=config["video_path"],
-                    drill_start_frame=entry_frame,
-                    fps=fps_cfg,
-                    frame_total=frame_total,
-                    config=config,
-                    session=session,
-                    denoise_session=denoise_session,
-                )
-            finally:
-                session.close()
-                if denoise_session is not None:
-                    try:
-                        denoise_session.close()
-                    except Exception:
-                        pass
-            preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
-            start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
-            save_transcription_sidecar(
-                output_dir=self.output_directory,
-                video_basename=self.video_basename,
-                segments=res.segments,
-                model=str(config.get("asr_backend", "parakeet")),
-                language=config.get("transcription_language", "en"),
-                aligned=True,
-                audio_window={"start_sec": max(0.0, start_sec - max(0.0, preroll)), "end_sec": None},
-            )
-            end_locator_result["window"] = res.window
-            logging.info(
-                "Streaming drill-end: end_frame=%s reason=%s (%.1fs audio, %d passes, %.1fs).",
-                res.window.end_frame, res.window.decision_reason,
-                res.last_audio_sec, res.passes, res.elapsed_sec,
-            )
-
-        def _locate_drill_end_batch(entry_frame: int) -> None:
-            start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
-            preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
-            _invoke_transcribe(audio_start_sec=max(0.0, start_sec - max(0.0, preroll)))
-            end_locator_result["window"] = compute_drill_window(
-                transcription_path=os.path.join(
-                    self.output_directory,
-                    f"{self.video_basename}_Transcription.json",
-                ),
-                drill_start_frame=entry_frame,
-                total_frames=frame_total,
-                frame_rate=fps_cfg,
-                config=config,
-            )
 
         for frame_num in tqdm(range(1, frame_total + 1), desc="Processing frames", unit="frame"):
             ret, frame = vs.read()
@@ -1093,12 +1043,12 @@ class ProcessingEngine:
             for idx, mx, my in map_points:
                 all_map_points.append([frame_num, idx, mx, my])
 
-            if ((max_after_entry is not None or stop_at_end)
+            if ((max_after_entry is not None or run_locator)
                     and first_entry_frame_live is None):
                 if any(o.get("is_entry") or o.get("birth_location") == "entry"
                        for o in frame_objects):
                     first_entry_frame_live = frame_num
-                    if stop_at_end and end_locator_thread is None:
+                    if run_locator and end_locator_thread is None:
                         end_locator_thread = threading.Thread(
                             target=_locate_drill_end,
                             args=(frame_num,),
@@ -1151,71 +1101,40 @@ class ProcessingEngine:
         # work operates on just the actual drill segment.
         fps = float(config.get("frame_rate", 30.0) or 30.0)
 
-        if drill_window_enabled and end_locator_thread is not None:
-            # Stop-at-drill-end path: transcription + window location already
-            # ran (or are finishing) in the background locator thread. Join it
-            # and reuse its result rather than transcribing a second time.
+        if run_locator and end_locator_thread is not None:
+            # The background locator streamed transcription + window location
+            # from first entry. Join it and reuse its result.
             end_locator_thread.join()
-            drill_start_frame_detected = find_drill_start_frame(tracker_output)
             drill_window = end_locator_result.get("window")
             if drill_window is None:
-                # Locator failed (exception) — fall back to a synchronous
-                # compute over whatever transcript exists, so the run still
-                # produces a window instead of crashing.
+                # Locator failed (exception) — fall back to a compute over
+                # whatever transcript exists so the run still produces a window.
                 drill_window = compute_drill_window(
                     transcription_path=os.path.join(
                         self.output_directory,
                         f"{self.video_basename}_Transcription.json",
                     ),
-                    drill_start_frame=drill_start_frame_detected,
+                    drill_start_frame=find_drill_start_frame(tracker_output),
                     total_frames=processed_frames,
                     frame_rate=fps,
                     config=config,
                 )
         elif drill_window_enabled:
-            drill_start_frame_detected = find_drill_start_frame(tracker_output)
-            if drill_start_frame_detected is not None and enable_transcription:
-                # Time convention: starts use (frame-1)/fps — frame N begins
-                # at (N-1)/fps for 1-indexed frames — matching the metrics'
-                # frame→seconds math; ends use frame/fps (end of frame).
-                drill_start_sec = (
-                    (float(drill_start_frame_detected) - 1.0) / fps if fps > 0 else 0.0
-                )
-                # Decouple the ASR slice from the exact detected start: a
-                # constant pre-roll makes WhisperX's VAD/segmentation
-                # independent of few-frame shifts in entry detection (which
-                # otherwise flip segment boundaries and move the matched
-                # drill-end segment by seconds). End-candidate filtering in
-                # compute_drill_window still uses drill_start_sec, so
-                # pre-roll audio can never select an end before the start.
-                preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
-                audio_start = max(0.0, drill_start_sec - max(0.0, preroll))
-                logging.info(
-                    "Running deferred transcription on audio slice from %.3fs "
-                    "(drill start %.3fs / frame %d, pre-roll %.1fs).",
-                    audio_start, drill_start_sec, drill_start_frame_detected, preroll,
-                )
-                _invoke_transcribe(audio_start_sec=audio_start)
-            elif drill_start_frame_detected is None:
-                logging.info(
-                    "Skipping transcription: no entry crossing detected by tracker."
-                )
-
-            transcription_path = os.path.join(
-                self.output_directory, f"{self.video_basename}_Transcription.json"
-            )
+            # Transcription off, or no entry was ever detected → no
+            # transcript-derived end; window falls back to whole-video.
             drill_window = compute_drill_window(
-                transcription_path=transcription_path if enable_transcription else None,
-                drill_start_frame=drill_start_frame_detected,
+                transcription_path=None,
+                drill_start_frame=find_drill_start_frame(tracker_output),
                 total_frames=processed_frames,
                 frame_rate=fps,
                 config=config,
             )
         else:
-            # Legacy path: parallel transcription thread is still running.
+            # Drill-window detection off: full-audio transcription (if any) ran
+            # in parallel; window is the whole processed video.
             if transcription_thread is not None:
                 transcription_thread.join()
-                logging.info("Transcription thread joined (legacy parallel mode).")
+                logging.info("Full-audio transcription thread joined.")
             drill_window = DrillWindow(
                 start_frame=1,
                 end_frame=processed_frames,

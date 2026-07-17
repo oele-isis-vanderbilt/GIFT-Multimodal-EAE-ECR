@@ -41,7 +41,7 @@ Drop your fine-tuned `models/pose.pth` and `models/detect-best-mAP.pth` (or any 
 
 ### Hugging Face token
 
-The transcription pipeline pulls WhisperX (`large-v3`) and wav2vec2 alignment weights from Hugging Face on first run, so a token is required.
+The transcription pipeline pulls the NeMo Parakeet-TDT checkpoint (`nvidia/parakeet-tdt-0.6b-v2`, ~2.4 GB) from Hugging Face on first run, so a token is required. See [TRANSCRIPTION.md](TRANSCRIPTION.md) for the ASR pipeline details.
 
 Generate one at <https://huggingface.co/settings/tokens> (read scope is enough), then store it once with the CLI:
 
@@ -81,7 +81,7 @@ The conda env's PyTorch is **not guaranteed to be a CUDA build**, so verify and 
 
    If this prints `True` and a CUDA version, you're done — skip to ONNX/TensorRT below.
 
-3. If it prints `False` / `None`, install the CUDA wheel **for the version this repo pins** — `torch 2.8.*` / `torchvision 0.23.*` / `torchaudio 2.8.*` (keep this version; pyannote.audio pins `torch==2.8.0`, and a mismatch breaks the torchvision ABI). Uninstall the current build, then from <https://pytorch.org/get-started/previous-versions/> grab the **v2.8.0** command whose `cu###` matches your `nvcc --version` toolkit:
+3. If it prints `False` / `None`, install the CUDA wheel **for the version this repo pins** — `torch 2.8.*` / `torchvision 0.23.*` / `torchaudio 2.8.*` (keep this version; a mismatch breaks the torchvision ABI, and torch 2.8 satisfies NeMo's `torch>=2.6`). Uninstall the current build, then from <https://pytorch.org/get-started/previous-versions/> grab the **v2.8.0** command whose `cu###` matches your `nvcc --version` toolkit:
 
    Pick the `cu###` for your toolkit: **12.6 → `cu126`, 12.8 → `cu128`, 12.9 (or anything newer, e.g. 13.x) → `cu129`** (the highest torch 2.8 ships).
 

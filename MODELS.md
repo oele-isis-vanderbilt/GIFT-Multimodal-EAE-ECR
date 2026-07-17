@@ -180,13 +180,11 @@ metric scores on full-length runs of this footage — fine-tuning via
 The default configuration is regression-gated: engine runs on
 `input/test.vmeta.xml` must reproduce the frozen baseline
 (ENTRANCE_VECTORS 1.0, ENTRANCE_HESITATION 1.0, TOTAL_TIME_OF_ENTRY 1.0,
-STAY_ALONG_WALL 0.90, drill window 1325–1725) with identical tracking
-output. Note: the pre-branch code scores 0.93 with window 1325–1885 on the
-same video — the difference is `transcription_preroll_sec` (the 5 s audio
-pre-roll makes WhisperX segment "First room is clear." as its own utterance
-ending at 28.3 s, instead of merging it with "proceeding to the next room"
-through 30.9 s; the tighter, more faithful drill end shortens the window and
-shifts STAY_ALONG_WALL). Set `"transcription_preroll_sec": 0` to reproduce
-the legacy window and score exactly. Every non-default backend is
-smoke-gated end-to-end (engine → tracker → metrics → overlays →
-viewer-loadable run folder).
+STAY_ALONG_WALL 0.93, drill window 1325–1855) with identical tracking
+output — matching the original pre-branch pipeline. The streaming Parakeet
+ASR (see [TRANSCRIPTION.md](TRANSCRIPTION.md)) lands the drill end at the
+natural sentence boundary ("First room is clear, proceed in the next room",
+~30.4 s); the exact end frame may vary ±0.5 s with the ASR's word alignment
+without affecting the metric scores. Every non-default backend is smoke-gated
+end-to-end (engine → tracker → metrics → overlays → viewer-loadable run
+folder).

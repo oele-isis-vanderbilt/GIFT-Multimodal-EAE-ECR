@@ -25,9 +25,10 @@ dependencies:
   - python=3.11
   - git
   - pip
-  # ``libs/Track`` imports ``pkg_resources``, which setuptools 75+ no longer
-  # ships by default. Pin <75 until libs/Track migrates to importlib.metadata.
-  - setuptools<75
+  # ``libs/Track`` imports ``pkg_resources``, which setuptools removed in 81.
+  # Pin <81 until libs/Track migrates to importlib.metadata. (NeMo pulls a
+  # newer setuptools via pip; this cap keeps pkg_resources available.)
+  - setuptools<81
 
   # ----- Numerical / data ---------------------------------------------------
   - numpy
@@ -62,8 +63,8 @@ dependencies:
   # ----- Deep-learning runtime --------------------------------------------
   # Torch trio installed from conda-forge: same channel keeps C++ ABI matched
   # (avoids ``operator torchvision::nms does not exist``) and shares the env's
-  # ``llvm-openmp`` (avoids macOS libomp dup-init abort). Trio version is
-  # aligned with the whisperx 3.7.4 + pyannote.audio 3.4.0 pair pinned below.
+  # ``llvm-openmp`` (avoids macOS libomp dup-init abort). torch 2.8 satisfies
+  # NeMo's ``torch>=2.6`` (the ASR engine, pinned below) without an upgrade.
   - conda-forge::pytorch=2.8.*
   - conda-forge::torchvision=0.23.*
   - conda-forge::torchaudio=2.8.*
@@ -96,13 +97,13 @@ dependencies:
       # routing (its bundled .dylibs ABI-skew with conda-forge ffmpeg).
       - soundfile
 
-      # ----- Audio / transcription -----------------------------------------
-      # whisperx + pyannote.audio pinned in concert with torch=2.8.x above.
-      # pyannote.audio 4.0+ hard-pins ``torch==2.8.0`` exactly which blocks
-      # newer GPU support and security patches; whisperx itself excludes
-      # pyannote 4.0+, so the 3.x line is the stable target.
-      - whisperx==3.7.4
-      - pyannote.audio==3.4.0
+      # ----- Audio / transcription (NeMo Parakeet) -------------------------
+      # ASR is NVIDIA NeMo's Parakeet-TDT (streaming, word timestamps, no
+      # external VAD needed). ``[asr]`` hard-pins ``transformers~=4.57`` and
+      # keeps torch>=2.6 (2.8 above is fine) and numpy>=2. First run downloads
+      # ``nvidia/parakeet-tdt-0.6b-v2`` (~2.4 GB) to the HuggingFace cache.
+      # See TRANSCRIPTION.md.
+      - nemo_toolkit[asr]
 
       # ----- giftpose runtime: optional accelerated backends ---------------
       # ONNX Runtime delivers a large CPU speedup vs the PyTorch backend;

@@ -106,7 +106,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enable_denoise": False,
     "denoise_device": "cpu",
     "asr_backend": "parakeet",
-    "asr_streaming": True,
     "asr_stream_chunk_sec": 8.0,
     "asr_stream_confirm_sec": 3.0,
     # drill window auto-detection (advanced defaults)
@@ -132,7 +131,7 @@ COMMENTS: Dict[str, str] = {
     "pose_model_size": "Model size for the selected backend. body2d: t/s/m/l/x ('x' = the project's fine-tuned models/pose.pth; other sizes are official checkpoints). wholebody: m/l/x. pose3d: l.",
     "auto_download_models": "When true, official checkpoints for non-default sizes/backends are downloaded automatically into models/ on first use. The fine-tuned default weights are never downloaded.",
     "pose_backend_weights": "Optional explicit weights file for a non-default backend (e.g. a future fine-tuned RTMW checkpoint). Overrides the registry download.",
-    "transcription_preroll_sec": "Seconds of audio included BEFORE the detected drill start when running the deferred transcription (default 5.0). Decouples WhisperX segmentation from few-frame shifts in entry detection so the transcript-derived drill end is stable; end candidates are still restricted to segments starting at/after the drill start. Set 0 to restore the exact-slice legacy behavior.",
+    "transcription_preroll_sec": "Seconds of audio included BEFORE the detected drill start when the streaming transcription begins (default 5.0). Gives the ASR speech context ahead of the entry; end candidates are still restricted to segments starting at/after the drill start.",
     "box_conf_threshold": "Minimum bbox confidence to accept a detection.",
     "pose_conf_threshold": "Minimum keypoint confidence to accept pose keypoints and render gaze/triangles.",
     "flip_test": "When true, the pose model also runs on a horizontally-flipped copy of each crop and averages the two outputs (~0.5-1 px better keypoint accuracy on hard / occluded cases). Doubles the per-frame pose batch and roughly doubles pose forward time. Default false for speed; enable if accuracy matters more than fps.",
@@ -163,14 +162,13 @@ COMMENTS: Dict[str, str] = {
 
     # audio + transcription
     "preserve_audio": "When true, camera-view annotated videos keep the original audio track (muxed via ffmpeg). Map-view videos remain silent. Harmless if the source has no audio.",
-    "enable_transcription": "When true, WhisperX runs on the source audio and saves a _Transcription.json sidecar with word-level timestamps. Default on. Whisper model and language detection are fixed at developer defaults (large-v3 + auto-detect) — only the device is user-tunable. The first run downloads several GB of model weights (~3 GB large-v3 + ~360 MB wav2vec2 per language); subsequent runs reuse the HuggingFace cache.",
-    "transcription_device": "Compute device for WhisperX ASR + alignment. cpu or cuda only — faster-whisper (CTranslate2) has no MPS backend; if mps is set (e.g. shared with the pose pipeline) the transcription pass auto-falls-back to cpu with a warning.",
-    "enable_denoise": "When true, runs Facebook Denoiser (dns64 model) on the source audio before WhisperX as an optional speech-enhancement pass. Improves ASR accuracy on noisy field audio. Only the transcription consumes the denoised audio — saved annotated videos always keep the original audio track. The denoised audio is preserved as {basename}_denoised.wav for verification. First use downloads ~128 MB checkpoint to ~/.cache/torch/hub/checkpoints/.",
+    "enable_transcription": "When true (default), NeMo Parakeet-TDT transcribes the drill audio and saves a _Transcription.json sidecar with word-level timestamps. The first run downloads the Parakeet checkpoint (~2.4 GB) to the HuggingFace cache; subsequent runs reuse it.",
+    "transcription_device": "Compute device for the Parakeet ASR. NeMo runs on cpu (or cuda where available); MPS is not a NeMo device, so on Apple Silicon the ASR runs on cpu while the pose pipeline uses MPS.",
+    "enable_denoise": "When true, runs Facebook Denoiser (dns48 model, streaming DemucsStreamer) on the audio before ASR as an optional speech-enhancement pass. Improves ASR accuracy on noisy field audio. Only the transcription consumes the denoised audio — saved annotated videos always keep the original track. First use downloads a ~128 MB checkpoint to ~/.cache/torch/hub/checkpoints/.",
     "denoise_device": "Compute device for FB Denoiser. cpu or cuda only — Demucs's internal conv1d exceeds the MPS 65536-output-channel kernel limit; if mps is set the denoiser auto-falls-back to cpu with a warning. Independent of transcription_device. Ignored when enable_denoise is false.",
     "drill_window_enabled": "When true, enables auto-detection of drill start (first tracker entry crossing) and drill end (latest transcript segment containing every word in drill_window_required_words). All metrics, artifact videos, and audio are trimmed to the detected window. Defer + slice transcription so WhisperX only processes the post-entry audio. Default true.",
     "stop_at_drill_end": "When true (default), transcription runs in a background thread as soon as the first entry is detected; the frame loop stops as soon as the located drill-end frame is reached, skipping post-drill footage (faster, and prevents post-drill track fragments from being mistaken for entrants). If no drill end can be identified (no matching transcript segment), processing continues to the video end unchanged. Requires drill_window_enabled and enable_transcription; ignored otherwise. Set false to always process the full video.",
-    "asr_backend": "Speech-to-text engine: 'parakeet' (default, NeMo Parakeet-TDT — streaming, fast, accurate) or 'whisperx' (legacy, transitional). Parakeet falls back to whisperx automatically if NeMo is unavailable.",
-    "asr_streaming": "When true (default), the drill-end transcription runs forward-chunked and stops as soon as the 'room clear' phrase is confirmed (stream-compatible, no wasted tail, robust to a mid-conversation cut). Set false to use the legacy single-pass batch transcription of the whole post-entry audio.",
+    "asr_backend": "Speech-to-text engine (NeMo Parakeet-TDT). Transcription is forward-chunked/streaming: it stops as soon as the 'room clear' phrase is confirmed (stream-compatible, no wasted tail, robust to a mid-conversation cut).",
     "asr_stream_chunk_sec": "Streaming ASR: seconds of audio added per forward chunk before re-checking for the drill-end phrase (default 8.0). Smaller = finer granularity, more transcription passes.",
     "asr_stream_confirm_sec": "Streaming ASR: shorter chunk (default 3.0s) read once a tentative 'room clear' appears, to confirm it via a second consecutive pass (LocalAgreement) while minimizing how far past the end we transcribe.",
     "drill_window_required_words": "Comma-separated list of words that must all appear in a transcript segment for it to qualify as the drill-end callout. Order doesn't matter, fillers between are fine, and matching is lowercase + punctuation-stripped. Default 'room,clear'.",
@@ -1327,7 +1325,7 @@ class ConfigBuilderWindow(QMainWindow):
         self.adv_widgets["preserve_audio"] = chk_audio
         self._add_adv_row("preserve_audio", chk_audio)
 
-        chk_txn = QCheckBox("Run WhisperX transcription after processing")
+        chk_txn = QCheckBox("Run speech transcription (drill-end detection)")
         chk_txn.stateChanged.connect(
             lambda s: self._set_adv_value("enable_transcription", bool(s == Qt.Checked))
         )
