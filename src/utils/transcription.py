@@ -198,6 +198,46 @@ def _float_or_none(value) -> Optional[float]:
         return None
 
 
+def save_transcription_sidecar(
+    *,
+    output_dir: str,
+    video_basename: str,
+    segments,
+    model: str,
+    language: Optional[str] = "en",
+    aligned: bool = True,
+    audio_window: Optional[Dict[str, Any]] = None,
+    denoise: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Write ``{basename}_Transcription.json`` in the standard schema.
+
+    Used by the streaming path (which already has serialized, offset segment
+    dicts) to produce the same sidecar the batch ``transcribe_video`` writes,
+    so downstream consumers and the viewer see an identical artifact.
+    """
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "source_video_basename": video_basename,
+        "language": language,
+        "model": model,
+        "compute_type": None,
+        "aligned": bool(aligned),
+        "audio_window": audio_window,
+        "denoise": denoise,
+        "segments": segments or [],
+    }
+    out_path = os.path.join(output_dir, f"{video_basename}_Transcription.json")
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        logging.info("Saved transcription to %s (%d segments)", out_path, len(payload["segments"]))
+        return out_path
+    except OSError:
+        logging.exception("Failed to write transcription JSON to %s", out_path)
+        return None
+
+
 def transcribe_video(
     source_video_path: str,
     output_dir: str,

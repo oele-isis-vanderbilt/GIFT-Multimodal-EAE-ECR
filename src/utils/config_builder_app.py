@@ -108,6 +108,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # drill window auto-detection (advanced defaults)
     "drill_window_enabled": True,
     "drill_window_required_words": "room,clear",
+    "stop_at_drill_end": True,
 }
 
 COMMENTS: Dict[str, str] = {
@@ -163,6 +164,7 @@ COMMENTS: Dict[str, str] = {
     "enable_denoise": "When true, runs Facebook Denoiser (dns64 model) on the source audio before WhisperX as an optional speech-enhancement pass. Improves ASR accuracy on noisy field audio. Only the transcription consumes the denoised audio — saved annotated videos always keep the original audio track. The denoised audio is preserved as {basename}_denoised.wav for verification. First use downloads ~128 MB checkpoint to ~/.cache/torch/hub/checkpoints/.",
     "denoise_device": "Compute device for FB Denoiser. cpu or cuda only — Demucs's internal conv1d exceeds the MPS 65536-output-channel kernel limit; if mps is set the denoiser auto-falls-back to cpu with a warning. Independent of transcription_device. Ignored when enable_denoise is false.",
     "drill_window_enabled": "When true, enables auto-detection of drill start (first tracker entry crossing) and drill end (latest transcript segment containing every word in drill_window_required_words). All metrics, artifact videos, and audio are trimmed to the detected window. Defer + slice transcription so WhisperX only processes the post-entry audio. Default true.",
+    "stop_at_drill_end": "When true (default), transcription runs in a background thread as soon as the first entry is detected; the frame loop stops as soon as the located drill-end frame is reached, skipping post-drill footage (faster, and prevents post-drill track fragments from being mistaken for entrants). If no drill end can be identified (no matching transcript segment), processing continues to the video end unchanged. Requires drill_window_enabled and enable_transcription; ignored otherwise. Set false to always process the full video.",
     "drill_window_required_words": "Comma-separated list of words that must all appear in a transcript segment for it to qualify as the drill-end callout. Order doesn't matter, fillers between are fine, and matching is lowercase + punctuation-stripped. Default 'room,clear'.",
 
     # UI-only

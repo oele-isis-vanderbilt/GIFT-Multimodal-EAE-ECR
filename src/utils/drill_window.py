@@ -123,6 +123,91 @@ def _candidate_summary(seg: Dict[str, Any], required: List[str]) -> Dict[str, An
     }
 
 
+# ---------------------------------------------------------------------------
+# Shared scan/select core — used by both the batch ``compute_drill_window``
+# and the streaming ``DrillEndDetector`` so there is exactly one rule
+# implementation. A "candidate" is a segment that starts at/after the drill
+# start and whose normalized text contains every required word.
+# ---------------------------------------------------------------------------
+def _qualifying_candidates(
+    segments: List[Dict[str, Any]],
+    drill_start_sec: float,
+    required_set: set,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for seg in segments:
+        seg_start = seg.get("start")
+        if not isinstance(seg_start, (int, float)):
+            continue
+        if seg_start < drill_start_sec:
+            continue
+        if required_set.issubset(set(_tokenize(seg.get("text", "")))):
+            out.append(seg)
+    return out
+
+
+def _select_candidate(
+    candidates: List[Dict[str, Any]],
+    min_score: float,
+    *,
+    prefer: str = "latest",
+) -> tuple:
+    """Apply the soft mean-align-score gate and choose one candidate.
+
+    ``prefer="latest"`` (batch) keeps the last qualifier; ``prefer="first"``
+    (streaming) keeps the earliest — the drill ends the first time the room
+    is called clear, not the last teammate echo. Returns ``(chosen, reason)``.
+    The gate is lenient: a ``None`` mean score (no per-word scores — e.g. the
+    Parakeet path) still passes, so word-presence remains the primary rule.
+    """
+    scored = [(c, _mean_align_score(c.get("words"))) for c in candidates]
+    passing = [c for (c, s) in scored if s is None or s >= min_score]
+    if passing:
+        chosen = passing[0] if prefer == "first" else passing[-1]
+        reason = "selected_%s_passing_score_gate" % prefer
+    else:
+        chosen = candidates[0] if prefer == "first" else candidates[-1]
+        reason = "selected_%s_below_score_gate" % prefer
+    return chosen, reason
+
+
+def _window_from_candidate(
+    chosen: Dict[str, Any],
+    *,
+    reason: str,
+    drill_start_frame: int,
+    drill_start_sec: float,
+    fps: float,
+    grace_tail: float,
+    total_frames: int,
+    candidate_summaries: List[Dict[str, Any]],
+    required: List[str],
+) -> DrillWindow:
+    seg_end_sec = chosen.get("end")
+    if not isinstance(seg_end_sec, (int, float)):
+        seg_end_sec = chosen.get("start", drill_start_sec)
+    end_sec = float(seg_end_sec) + max(0.0, grace_tail)
+    end_frame = int(round(end_sec * fps))
+    end_frame = max(drill_start_frame, min(total_frames, end_frame))
+    return DrillWindow(
+        start_frame=drill_start_frame,
+        end_frame=end_frame,
+        end_uncertain=False,
+        decision_reason=reason,
+        matched_segment={
+            "id": chosen.get("id"),
+            "start_sec": chosen.get("start"),
+            "end_sec": chosen.get("end"),
+            "text": chosen.get("text"),
+            "mean_align_score": _mean_align_score(chosen.get("words")),
+        },
+        candidates=candidate_summaries,
+        required_words=required,
+        start_time_sec=drill_start_sec,
+        end_time_sec=end_frame / fps if fps > 0 else None,
+    )
+
+
 def compute_drill_window(
     *,
     transcription_path: Optional[str],
@@ -178,19 +263,8 @@ def compute_drill_window(
             end_time_sec=total_frames / fps if fps > 0 else None,
         )
 
-    # ---- Build candidate list ---------------------------------------------
-    required_set = set(required)
-    candidates: List[Dict[str, Any]] = []
-    for seg in segments:
-        seg_start = seg.get("start")
-        if not isinstance(seg_start, (int, float)):
-            continue
-        if seg_start < drill_start_sec:
-            continue
-        tokens = set(_tokenize(seg.get("text", "")))
-        if required_set.issubset(tokens):
-            candidates.append(seg)
-
+    # ---- Build candidate list (shared scan core) --------------------------
+    candidates = _qualifying_candidates(segments, drill_start_sec, set(required))
     candidate_summaries = [_candidate_summary(s, required) for s in candidates]
 
     if not candidates:
@@ -205,42 +279,128 @@ def compute_drill_window(
             end_time_sec=total_frames / fps if fps > 0 else None,
         )
 
-    # ---- Apply soft cross-room ghost gate ---------------------------------
-    scored = [(c, _mean_align_score(c.get("words"))) for c in candidates]
-    passing = [(c, s) for (c, s) in scored if s is None or s >= min_score]
-
-    if passing:
-        chosen = passing[-1][0]      # latest passing
-        reason = "selected_latest_passing_score_gate"
-    else:
-        chosen = candidates[-1]      # latest period
-        reason = "selected_latest_below_score_gate"
-
-    # ---- Compute end frame -------------------------------------------------
-    seg_end_sec = chosen.get("end")
-    if not isinstance(seg_end_sec, (int, float)):
-        seg_end_sec = chosen.get("start", drill_start_sec)
-    end_sec = float(seg_end_sec) + max(0.0, grace_tail)
-    end_frame = int(round(end_sec * fps))
-    end_frame = max(drill_start_frame, min(total_frames, end_frame))
-
-    return DrillWindow(
-        start_frame=drill_start_frame,
-        end_frame=end_frame,
-        end_uncertain=False,
-        decision_reason=reason,
-        matched_segment={
-            "id": chosen.get("id"),
-            "start_sec": chosen.get("start"),
-            "end_sec": chosen.get("end"),
-            "text": chosen.get("text"),
-            "mean_align_score": _mean_align_score(chosen.get("words")),
-        },
-        candidates=candidate_summaries,
-        required_words=required,
-        start_time_sec=drill_start_sec,
-        end_time_sec=end_frame / fps if fps > 0 else None,
+    # ---- Soft ghost gate + latest-passing selection (batch semantics) -----
+    chosen, reason = _select_candidate(candidates, min_score, prefer="latest")
+    return _window_from_candidate(
+        chosen,
+        reason=reason,
+        drill_start_frame=drill_start_frame,
+        drill_start_sec=drill_start_sec,
+        fps=fps,
+        grace_tail=grace_tail,
+        total_frames=total_frames,
+        candidate_summaries=candidate_summaries,
+        required=required,
     )
+
+
+class DrillEndDetector:
+    """Stateful, incremental drill-end detector for streaming transcription.
+
+    Fed the current-pass transcript segments via :meth:`update` as audio
+    arrives. Fires on the **first** qualifying segment (contains every
+    required word, starts at/after the drill start) — but only after
+    **LocalAgreement-2** confirmation: the qualifying segment must appear in
+    two consecutive passes before it is trusted, so a one-off mis-hearing of
+    "clear" cannot end the drill early. Shares the exact scan/select/build
+    core with :func:`compute_drill_window` (word-presence rule, score gate,
+    grace tail, frame math) so streaming and batch never diverge.
+
+    If the stream ends without a confirmed fire, :meth:`finalize` applies the
+    batch "latest-passing" rule over everything accumulated (or reports
+    ``end_uncertain`` when nothing qualified) — matching the legacy fallback.
+    """
+
+    def __init__(
+        self,
+        *,
+        drill_start_frame: int,
+        fps: float,
+        total_frames: int,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        config = config or {}
+        self.fps = float(fps or config.get("frame_rate") or 30.0)
+        self.drill_start_frame = max(1, int(drill_start_frame))
+        self.drill_start_sec = (self.drill_start_frame - 1) / self.fps if self.fps > 0 else 0.0
+        self.total_frames = max(1, int(total_frames))
+        self.required = _parse_required_words(config.get("drill_window_required_words"))
+        self.required_set = set(self.required)
+        self.min_score = float(config.get("drill_window_min_align_score", DEFAULT_MIN_ALIGN_SCORE))
+        self.grace_tail = float(config.get("drill_window_grace_tail_sec", GRACE_TAIL_SEC))
+        # Latest full-transcript pass (each pass supersedes the previous —
+        # the worker re-transcribes the growing buffer), plus the set of
+        # qualifying-candidate keys seen in the previous pass (for the
+        # two-consecutive-pass confirmation).
+        self._segments: List[Dict[str, Any]] = []
+        self._prev_keys: set = set()
+
+    @property
+    def has_pending(self) -> bool:
+        """A qualifier was seen last pass and awaits its second confirmation.
+
+        The worker uses this to read only a short confirmation chunk (instead
+        of a full chunk) once a tentative "room clear" appears, minimizing how
+        far past the true end we transcribe while still getting the extra
+        right-context LocalAgreement needs.
+        """
+        return bool(self._prev_keys)
+
+    @staticmethod
+    def _key(seg: Dict[str, Any]) -> float:
+        # 0.5 s bins tolerate the small start-time drift between passes.
+        return round(float(seg.get("start", 0.0)) * 2.0) / 2.0
+
+    def update(self, segments: List[Dict[str, Any]]) -> Optional[DrillWindow]:
+        """Feed the current pass's full segment list; return a window if fired."""
+        self._segments = list(segments or [])
+        candidates = _qualifying_candidates(
+            self._segments, self.drill_start_sec, self.required_set
+        )
+        cur_keys = {self._key(c) for c in candidates}
+        confirmed = cur_keys & self._prev_keys
+        self._prev_keys = cur_keys
+        if not confirmed:
+            return None
+        # Earliest confirmed qualifier that also passes the (lenient) gate.
+        confirmed_cands = [c for c in candidates if self._key(c) in confirmed]
+        chosen, reason = _select_candidate(confirmed_cands, self.min_score, prefer="first")
+        return self._build(chosen, reason.replace("selected_", "streaming_confirmed_"))
+
+    def finalize(self) -> DrillWindow:
+        """Stream ended without a confirmed fire — batch fallback over all."""
+        candidates = _qualifying_candidates(
+            self._segments, self.drill_start_sec, self.required_set
+        )
+        if not candidates:
+            return DrillWindow(
+                start_frame=self.drill_start_frame,
+                end_frame=self.total_frames,
+                end_uncertain=True,
+                decision_reason="no_clearance_phrase_found",
+                candidates=[_candidate_summary(s, self.required) for s in candidates],
+                required_words=self.required,
+                start_time_sec=self.drill_start_sec,
+                end_time_sec=self.total_frames / self.fps if self.fps > 0 else None,
+            )
+        chosen, reason = _select_candidate(candidates, self.min_score, prefer="latest")
+        return self._build(chosen, reason)
+
+    def _build(self, chosen: Dict[str, Any], reason: str) -> DrillWindow:
+        candidates = _qualifying_candidates(
+            self._segments, self.drill_start_sec, self.required_set
+        )
+        return _window_from_candidate(
+            chosen,
+            reason=reason,
+            drill_start_frame=self.drill_start_frame,
+            drill_start_sec=self.drill_start_sec,
+            fps=self.fps,
+            grace_tail=self.grace_tail,
+            total_frames=self.total_frames,
+            candidate_summaries=[_candidate_summary(s, self.required) for s in candidates],
+            required=self.required,
+        )
 
 
 def save_drill_window_sidecar(

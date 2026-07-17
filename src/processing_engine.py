@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # torchvision's image extension imports a host libjpeg.9.dylib that the conda
 # stack does not ship — we never use ``torchvision.io``, so silence its
@@ -63,7 +63,7 @@ from .utils.drill_window import (
 )
 from .utils.torch_memory import free_torch_memory
 from .utils.transcode import transcode
-from .utils.transcription import transcribe_video
+from .utils.transcription import save_transcription_sidecar, transcribe_video
 from .utils.video import count_video_frames, get_video_framerate
 from .utils.vmeta import generate_vmeta
 
@@ -781,6 +781,109 @@ class ProcessingEngine:
         max_after_entry = int(max_after_entry) if max_after_entry else None
         first_entry_frame_live: Optional[int] = None
 
+        # Stop-at-drill-end: once the tracker confirms the first entry, the
+        # audio slice is fully determined, so transcription + drill-end
+        # location run in a background thread while the frame loop continues.
+        # As soon as the located end frame is reached (or already passed),
+        # the loop stops — post-drill footage adds nothing downstream (all
+        # artifacts and metrics are drill-window-scoped). If no end can be
+        # identified (no transcript match), processing continues to the video
+        # end exactly as before. Disable with ``stop_at_drill_end: false``.
+        stop_at_end = (
+            bool(config.get("stop_at_drill_end", True))
+            and drill_window_enabled
+            and enable_transcription
+        )
+        fps_cfg = float(config.get("frame_rate", 30.0) or 30.0)
+        end_locator_thread: Optional[threading.Thread] = None
+        end_locator_result: Dict[str, Any] = {}
+        end_locator_done = threading.Event()
+
+        use_streaming_asr = bool(config.get("asr_streaming", True))
+
+        def _locate_drill_end(entry_frame: int) -> None:
+            try:
+                if use_streaming_asr:
+                    _locate_drill_end_streaming(entry_frame)
+                else:
+                    _locate_drill_end_batch(entry_frame)
+            except Exception:
+                logging.exception(
+                    "Drill-end location failed; processing continues to video end."
+                )
+            finally:
+                end_locator_done.set()
+
+        def _locate_drill_end_streaming(entry_frame: int) -> None:
+            # Forward-chunked, stop-at-confirmed-end transcription. Loads the
+            # ASR model once and transcribes only up to ~one confirmation chunk
+            # past the drill end (never to EOF), then writes the standard
+            # Transcription.json sidecar from the accumulated segments.
+            from .utils.asr_session import build_session
+            from .utils.drill_stream import locate_drill_end_streaming
+            session = build_session(config.get("asr_backend", "whisperx"), config)
+            denoise_session = None
+            if bool(config.get("enable_denoise", False)):
+                try:
+                    from .utils.denoise import DenoiseSession
+                    denoise_session = DenoiseSession(
+                        model_name="dns48",
+                        dry=float(config.get("denoise_dry", 0.5)),
+                        device=config.get("denoise_device") or config.get("transcription_device", "cpu"),
+                    )
+                except Exception:
+                    logging.warning("Denoise session init failed; continuing without denoise.", exc_info=True)
+                    denoise_session = None
+            try:
+                res = locate_drill_end_streaming(
+                    source_path=config["video_path"],
+                    drill_start_frame=entry_frame,
+                    fps=fps_cfg,
+                    frame_total=frame_total,
+                    config=config,
+                    session=session,
+                    denoise_session=denoise_session,
+                )
+            finally:
+                session.close()
+                if denoise_session is not None:
+                    try:
+                        denoise_session.close()
+                    except Exception:
+                        pass
+            preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
+            start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
+            save_transcription_sidecar(
+                output_dir=self.output_directory,
+                video_basename=self.video_basename,
+                segments=res.segments,
+                model=str(config.get("asr_backend", "whisperx")),
+                language=config.get("transcription_language", "en"),
+                aligned=True,
+                audio_window={"start_sec": max(0.0, start_sec - max(0.0, preroll)), "end_sec": None},
+            )
+            end_locator_result["window"] = res.window
+            logging.info(
+                "Streaming drill-end: end_frame=%s reason=%s (%.1fs audio, %d passes, %.1fs).",
+                res.window.end_frame, res.window.decision_reason,
+                res.last_audio_sec, res.passes, res.elapsed_sec,
+            )
+
+        def _locate_drill_end_batch(entry_frame: int) -> None:
+            start_sec = (float(entry_frame) - 1.0) / fps_cfg if fps_cfg > 0 else 0.0
+            preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
+            _invoke_transcribe(audio_start_sec=max(0.0, start_sec - max(0.0, preroll)))
+            end_locator_result["window"] = compute_drill_window(
+                transcription_path=os.path.join(
+                    self.output_directory,
+                    f"{self.video_basename}_Transcription.json",
+                ),
+                drill_start_frame=entry_frame,
+                total_frames=frame_total,
+                frame_rate=fps_cfg,
+                config=config,
+            )
+
         for frame_num in tqdm(range(1, frame_total + 1), desc="Processing frames", unit="frame"):
             ret, frame = vs.read()
             if not ret or frame is None:
@@ -990,18 +1093,40 @@ class ProcessingEngine:
             for idx, mx, my in map_points:
                 all_map_points.append([frame_num, idx, mx, my])
 
-            if max_after_entry is not None:
-                if first_entry_frame_live is None:
-                    if any(o.get("is_entry") or o.get("birth_location") == "entry"
-                           for o in frame_objects):
-                        first_entry_frame_live = frame_num
-                if (first_entry_frame_live is not None
-                        and frame_num >= first_entry_frame_live + max_after_entry):
+            if ((max_after_entry is not None or stop_at_end)
+                    and first_entry_frame_live is None):
+                if any(o.get("is_entry") or o.get("birth_location") == "entry"
+                       for o in frame_objects):
+                    first_entry_frame_live = frame_num
+                    if stop_at_end and end_locator_thread is None:
+                        end_locator_thread = threading.Thread(
+                            target=_locate_drill_end,
+                            args=(frame_num,),
+                            name="drill-end-locator",
+                            daemon=False,
+                        )
+                        end_locator_thread.start()
+                        logging.info(
+                            "First entry at frame %d — transcription started in "
+                            "background to locate the drill end.", frame_num,
+                        )
+            if (max_after_entry is not None
+                    and first_entry_frame_live is not None
+                    and frame_num >= first_entry_frame_live + max_after_entry):
+                logging.info(
+                    "Early stop: %d frames processed after first entry at frame %d "
+                    "(max_frames_after_first_entry=%d).",
+                    frame_num - first_entry_frame_live, first_entry_frame_live,
+                    max_after_entry,
+                )
+                break
+            if stop_at_end and end_locator_done.is_set():
+                _w = end_locator_result.get("window")
+                if (_w is not None and not _w.end_uncertain
+                        and frame_num >= int(_w.end_frame)):
                     logging.info(
-                        "Early stop: %d frames processed after first entry at frame %d "
-                        "(max_frames_after_first_entry=%d).",
-                        frame_num - first_entry_frame_live, first_entry_frame_live,
-                        max_after_entry,
+                        "Stopping at frame %d: drill end identified at frame %d (%s).",
+                        frame_num, int(_w.end_frame), _w.decision_reason,
                     )
                     break
 
@@ -1026,7 +1151,28 @@ class ProcessingEngine:
         # work operates on just the actual drill segment.
         fps = float(config.get("frame_rate", 30.0) or 30.0)
 
-        if drill_window_enabled:
+        if drill_window_enabled and end_locator_thread is not None:
+            # Stop-at-drill-end path: transcription + window location already
+            # ran (or are finishing) in the background locator thread. Join it
+            # and reuse its result rather than transcribing a second time.
+            end_locator_thread.join()
+            drill_start_frame_detected = find_drill_start_frame(tracker_output)
+            drill_window = end_locator_result.get("window")
+            if drill_window is None:
+                # Locator failed (exception) — fall back to a synchronous
+                # compute over whatever transcript exists, so the run still
+                # produces a window instead of crashing.
+                drill_window = compute_drill_window(
+                    transcription_path=os.path.join(
+                        self.output_directory,
+                        f"{self.video_basename}_Transcription.json",
+                    ),
+                    drill_start_frame=drill_start_frame_detected,
+                    total_frames=processed_frames,
+                    frame_rate=fps,
+                    config=config,
+                )
+        elif drill_window_enabled:
             drill_start_frame_detected = find_drill_start_frame(tracker_output)
             if drill_start_frame_detected is not None and enable_transcription:
                 # Time convention: starts use (frame-1)/fps — frame N begins
