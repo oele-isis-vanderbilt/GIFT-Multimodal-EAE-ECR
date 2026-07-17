@@ -128,6 +128,7 @@ COMMENTS: Dict[str, str] = {
     "pose_model_size": "Model size for the selected backend. body2d: t/s/m/l/x ('x' = the project's fine-tuned models/pose.pth; other sizes are official checkpoints). wholebody: m/l/x. pose3d: l.",
     "auto_download_models": "When true, official checkpoints for non-default sizes/backends are downloaded automatically into models/ on first use. The fine-tuned default weights are never downloaded.",
     "pose_backend_weights": "Optional explicit weights file for a non-default backend (e.g. a future fine-tuned RTMW checkpoint). Overrides the registry download.",
+    "transcription_preroll_sec": "Seconds of audio included BEFORE the detected drill start when running the deferred transcription (default 5.0). Decouples WhisperX segmentation from few-frame shifts in entry detection so the transcript-derived drill end is stable; end candidates are still restricted to segments starting at/after the drill start. Set 0 to restore the exact-slice legacy behavior.",
     "facing_metadata": "When true (default), per-frame per-track facing direction metadata (KGF estimator) is computed from the canonical keypoints and saved to {basename}_FacingCache.txt plus a compact per-object 'facing' field in TrackerOutput.json. Metadata only: no effect on metrics or renderings.",
 
     "box_conf_threshold": "Minimum bbox confidence to accept a detection.",

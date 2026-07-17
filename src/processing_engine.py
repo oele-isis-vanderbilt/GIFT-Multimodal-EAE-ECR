@@ -1036,11 +1036,21 @@ class ProcessingEngine:
                 drill_start_sec = (
                     (float(drill_start_frame_detected) - 1.0) / fps if fps > 0 else 0.0
                 )
+                # Decouple the ASR slice from the exact detected start: a
+                # constant pre-roll makes WhisperX's VAD/segmentation
+                # independent of few-frame shifts in entry detection (which
+                # otherwise flip segment boundaries and move the matched
+                # drill-end segment by seconds). End-candidate filtering in
+                # compute_drill_window still uses drill_start_sec, so
+                # pre-roll audio can never select an end before the start.
+                preroll = float(config.get("transcription_preroll_sec", 5.0) or 0.0)
+                audio_start = max(0.0, drill_start_sec - max(0.0, preroll))
                 logging.info(
-                    "Running deferred transcription on audio slice from %.3fs (frame %d) onward.",
-                    drill_start_sec, drill_start_frame_detected,
+                    "Running deferred transcription on audio slice from %.3fs "
+                    "(drill start %.3fs / frame %d, pre-roll %.1fs).",
+                    audio_start, drill_start_sec, drill_start_frame_detected, preroll,
                 )
-                _invoke_transcribe(audio_start_sec=drill_start_sec)
+                _invoke_transcribe(audio_start_sec=audio_start)
             elif drill_start_frame_detected is None:
                 logging.info(
                     "Skipping transcription: no entry crossing detected by tracker."
