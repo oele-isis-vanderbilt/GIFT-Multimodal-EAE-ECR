@@ -46,3 +46,6 @@ DESCRIPTION.md
 
 # Stray run logs at repo root (bench/debug runs)
 /*.log
+
+# CVsports paper repo — independent git repo, never part of this history
+/CVsports/
