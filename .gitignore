@@ -47,5 +47,8 @@ DESCRIPTION.md
 # Stray run logs at repo root (bench/debug runs)
 /*.log
 
-# CVsports paper repo — independent git repo, never part of this history
-/CVsports/
+# /trackdiag/ — retained mocap capture data only (raw QTM archive + curated study inputs).
+# The tracking-diagnostics paper project that lived here was discontinued 2026-08-21 and
+# its code, results and git history were deleted. What remains is human-subjects data and
+# must never enter this history. See trackdiag/README.md.
+/trackdiag/
