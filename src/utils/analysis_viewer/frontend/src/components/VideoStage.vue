@@ -6,6 +6,7 @@
           v-for="m in availableModes"
           :key="m.value"
           :class="{ active: playback.mode === m.value }"
+          :disabled="ui.podAdjustActive"
           @click="playback.mode = m.value"
         >
           {{ m.label }}
@@ -36,11 +37,12 @@
         />
         <SubtitleOverlay v-if="player.role === 'primary'" />
         <MapBandCanvas v-if="player.role === 'aux'" />
+        <PodSectorsCanvas v-if="player.role === 'aux'" />
       </div>
     </div>
 
-    <footer class="transport">
-      <button class="play-btn" :disabled="!hasPrimary" @click="togglePlay">
+    <footer class="transport" :class="{ locked: ui.podAdjustActive }">
+      <button class="play-btn" :disabled="!hasPrimary || ui.podAdjustActive" @click="togglePlay">
         {{ playback.isPlaying ? '⏸' : '▶' }}
       </button>
       <input
@@ -49,7 +51,7 @@
         :min="playbackRange.start"
         :max="playbackRange.end"
         :value="playback.currentFrame"
-        :disabled="!hasPrimary"
+        :disabled="!hasPrimary || ui.podAdjustActive"
         @input="onScrub"
       />
       <span class="readout">
@@ -59,7 +61,7 @@
       <select
         class="speed"
         :value="playback.speed"
-        :disabled="!hasPrimary"
+        :disabled="!hasPrimary || ui.podAdjustActive"
         @change="onSpeedChange"
       >
         <option v-for="s in speedOptions" :key="s" :value="s">{{ s }}×</option>
@@ -77,6 +79,7 @@ import { videoUrl } from '@/api/client';
 import VideoPlayer from './VideoPlayer.vue';
 import SubtitleOverlay from './SubtitleOverlay.vue';
 import MapBandCanvas from './MapBandCanvas.vue';
+import PodSectorsCanvas from './PodSectorsCanvas.vue';
 
 type PlayerRole = 'primary' | 'aux';
 type PlayerInstance = InstanceType<typeof VideoPlayer>;
@@ -99,6 +102,25 @@ watch(
       playback.isPlaying = false;
     }
   },
+);
+
+// Entering POD/drill-end adjust mode must (a) stop playback — the marker is
+// placed against a specific frame, so the video must not drift under it —
+// and (b) land the primary player on the adjust frame. The seek is issued
+// post-flush: enterAdjust also forces mode='original', which remounts the
+// primary (keyed cell), so a seek issued in the same tick would be consumed
+// by the outgoing player and lost.
+watch(
+  () => ui.podAdjustActive,
+  (active) => {
+    if (!active) return;
+    resumeAfterModeChange = false; // the mode watcher may have latched a resume
+    playerRefs.get('primary')?.pause();
+    playerRefs.get('aux')?.pause();
+    playback.isPlaying = false;
+    if (ui.podAdjustFrame != null) playback.requestSeek(ui.podAdjustFrame);
+  },
+  { flush: 'post' },
 );
 
 const speedOptions = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -356,6 +378,13 @@ watch(
   .video-grid {
     min-height: 0;
   }
+}
+
+/* POD-adjust mode: the timeline drag owns seeking — lock the transport so
+   nothing else can move the video out from under the marker. */
+.transport.locked {
+  pointer-events: none;
+  opacity: 0.45;
 }
 
 .transport {

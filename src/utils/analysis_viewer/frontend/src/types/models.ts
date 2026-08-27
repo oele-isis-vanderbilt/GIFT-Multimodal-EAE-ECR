@@ -130,12 +130,30 @@ export type WallExcursionTimelineItem = {
   data: WallExcursionItemData;
 };
 
+export type PodEstablishmentItemData = {
+  source: 'auto' | 'instructor';
+  member_count: number;
+  sector_angle_degrees: number | null;
+};
+
+export type PodEstablishmentTimelineItem = {
+  item_id: 'pod_establishment';
+  metric_id: 'pod_sector_coverage';
+  kind: 'pod_establishment';
+  label: string;
+  flag_ids: string[];
+  frame: number;
+  time_sec: number | null;
+  data: PodEstablishmentItemData;
+};
+
 export type TimelineItem =
   | EntryTimelineItem
   | VectorTimelineItem
   | PairGapTimelineItem
   | DurationTimelineItem
-  | WallExcursionTimelineItem;
+  | WallExcursionTimelineItem
+  | PodEstablishmentTimelineItem;
 
 export type EntranceVectorsSummary = {
   vector_count: number;
@@ -185,7 +203,52 @@ export type MoveAlongWallSummary = {
   per_entrant?: MoveAlongWallEntrant[];
 };
 
+export type PodMember = {
+  id: number;
+  pos: [number, number];
+  bearing: [number, number];
+  bearing_deg: number;
+  confidence: number;
+};
+
+export type PodSectorCoverageSummary = {
+  pod_frame: number | null;
+  pod_time_sec: number | null;
+  source: 'auto' | 'instructor';
+  sector_angle_degrees: number | null;
+  members: PodMember[];
+  /** track_id -> list of polygons (each a closed ring of [x, y] map px). */
+  sectors: Record<string, Array<Array<[number, number]>>>;
+  excluded_members?: Array<{ id: number; reason: string }>;
+  reason?: string;
+};
+
+export type PodMutualFacingSummary = {
+  violators: number[];
+  pairs: Array<{ from: number; to: number; angle_off_deg?: number }>;
+  member_count: number;
+  sector_angle_degrees: number | null;
+};
+
 export type MetricRecord =
+  | {
+      metric_id: 'pod_sector_coverage';
+      label: string;
+      score: number;
+      uncertain?: boolean;
+      summary: PodSectorCoverageSummary;
+      timeline_item_ids: string[];
+      flag_ids: string[];
+    }
+  | {
+      metric_id: 'pod_mutual_facing';
+      label: string;
+      score: number;
+      uncertain?: boolean;
+      summary: PodMutualFacingSummary;
+      timeline_item_ids: string[];
+      flag_ids: string[];
+    }
   | {
       metric_id: 'entrance_vectors';
       label: string;
@@ -225,11 +288,17 @@ export type FlagType =
   | 'vector_direction_violation'
   | 'total_entry_time_violation'
   | 'wall_too_close'
-  | 'wall_too_far';
+  | 'wall_too_far'
+  | 'pod_establishment'
+  | 'pod_coverage'
+  | 'pod_flagging'
+  | 'drill_start'
+  | 'drill_end';
 
 export type FlagRecord = {
   flag_id: string;
-  metric_id: string;
+  /** null for session-level info flags (drill start/end). */
+  metric_id: string | null;
   linked_item_id: string | null;
   type: FlagType;
   severity: string;
@@ -241,6 +310,25 @@ export type FlagRecord = {
   end_time_sec?: number;
   title: string;
   message: string;
+  /** pod_flagging: the member whose sector contains a teammate. */
+  track_id?: number;
+  /** pod_flagging: the teammate being covered. */
+  target_id?: number;
+  /** pod_flagging: how far (deg) the muzzle bearing is off the teammate line. */
+  angle_off_deg?: number | null;
+  /** pod_establishment: 'auto' or 'instructor'. */
+  source?: string;
+};
+
+export type AnalysisOverrides = {
+  schema_version: string;
+  pod_frame_override: number | null;
+  drill_end_override?: number | null;
+  deleted_flag_ids: string[];
+  pod_recompute_error?: string;
+  drill_recompute_error?: string;
+  /** Human-readable warnings from override application (e.g. POD invalidated). */
+  notices?: string[];
 };
 
 export type Entity = {
@@ -251,7 +339,7 @@ export type Entity = {
 
 export type ArtifactsBlock = {
   videos: Partial<Record<'original' | 'motion_camera' | 'motion_map' | 'gaze_camera' | 'gaze_map', string>>;
-  images: Partial<Record<'empty_map', string>>;
+  images: Partial<Record<'empty_map' | 'pod_sectors' | 'pod_camera', string>>;
   data: Partial<Record<'tracker_output' | 'position_cache' | 'gaze_cache' | 'metrics_cache', string>>;
 };
 
@@ -265,6 +353,8 @@ export type DrillWindow = {
   matched_segment: string | null;
   candidates: unknown[];
   required_words: string[];
+  /** 'instructor' after a drill-end adjustment (absent on engine output). */
+  source?: string;
 };
 
 export type TranscriptionWord = {
@@ -315,6 +405,10 @@ export type AnalysisSession = {
   resolved_video_path?: string | null;
   run_info?: RunInfo;
   run_dir?: string;
+  /** Instructor-deleted flags (restorable). Always present after load. */
+  flag_bin?: FlagRecord[];
+  /** Effective instructor-overrides sidecar. Always present after load. */
+  overrides?: AnalysisOverrides;
 };
 
 // --- Run manifest + Compare-mode payloads ----------------------------------

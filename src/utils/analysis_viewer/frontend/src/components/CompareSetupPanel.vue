@@ -168,12 +168,18 @@ function toEngineMetricId(id: string): string {
   return ENGINE_ID_MAP[id] ?? id.toUpperCase();
 }
 
+// POD metrics have no expertCompare implementation yet — hide them from the
+// compare picker rather than surfacing a backend error.
+const COMPARE_EXCLUDED = new Set(['pod_sector_coverage', 'pod_mutual_facing']);
+
 const metricsToShow = computed(() => {
-  return (session.session?.metrics ?? []).map((m) => ({
-    metric_id: m.metric_id,
-    metric_id_upper: toEngineMetricId(m.metric_id),
-    label: m.label,
-  }));
+  return (session.session?.metrics ?? [])
+    .filter((m) => !COMPARE_EXCLUDED.has(m.metric_id))
+    .map((m) => ({
+      metric_id: m.metric_id,
+      metric_id_upper: toEngineMetricId(m.metric_id),
+      label: m.label,
+    }));
 });
 
 const currentSideLabel = computed(() => {

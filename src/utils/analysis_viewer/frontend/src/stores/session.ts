@@ -6,7 +6,7 @@ import type {
   MetricRecord,
   TimelineItem,
 } from '@/types/models';
-import { fetchSession } from '@/api/client';
+import { deleteFlag, fetchSession, restoreFlag, setDrillEnd, setPodFrame } from '@/api/client';
 
 export const useSessionStore = defineStore('session', () => {
   const session = ref<AnalysisSession | null>(null);
@@ -58,14 +58,69 @@ export const useSessionStore = defineStore('session', () => {
     error.value = null;
   }
 
+  /** Current path key for adjustment endpoints (run dir preferred). */
+  function sessionPathKey(): string | null {
+    return session.value?.run_dir ?? session.value?.session_json_path ?? null;
+  }
+
+  const mutating = ref(false);
+  // Adjustment failures land here, NOT in `error` — `error` means "no
+  // session could be loaded" and blanks the panels; a failed flag/POD
+  // mutation leaves the loaded session fully usable.
+  const mutationError = ref<string | null>(null);
+
+  async function _mutate(action: () => Promise<AnalysisSession>): Promise<boolean> {
+    mutating.value = true;
+    mutationError.value = null;
+    try {
+      session.value = await action();
+      return true;
+    } catch (e: unknown) {
+      mutationError.value = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      mutating.value = false;
+    }
+  }
+
+  async function removeFlag(flagId: string): Promise<boolean> {
+    const key = sessionPathKey();
+    if (!key) return false;
+    return _mutate(() => deleteFlag(key, flagId));
+  }
+
+  async function unbinFlag(flagId: string): Promise<boolean> {
+    const key = sessionPathKey();
+    if (!key) return false;
+    return _mutate(() => restoreFlag(key, flagId));
+  }
+
+  async function adjustPodFrame(frame: number | null): Promise<boolean> {
+    const key = sessionPathKey();
+    if (!key) return false;
+    return _mutate(() => setPodFrame(key, frame));
+  }
+
+  async function adjustDrillEnd(frame: number | null): Promise<boolean> {
+    const key = sessionPathKey();
+    if (!key) return false;
+    return _mutate(() => setDrillEnd(key, frame));
+  }
+
   return {
     session,
     loading,
     error,
+    mutating,
+    mutationError,
     itemById,
     metricById,
     flagById,
     load,
     clear,
+    removeFlag,
+    unbinFlag,
+    adjustPodFrame,
+    adjustDrillEnd,
   };
 });

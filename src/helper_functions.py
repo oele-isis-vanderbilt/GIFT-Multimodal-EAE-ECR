@@ -758,7 +758,16 @@ def annotate_map_video(
     *,
     start_frame: Optional[int] = None,
     end_frame: Optional[int] = None,
+    orientation_by_frame: Optional[Dict[Tuple[int, int], Tuple[float, float]]] = None,
 ):
+    """Trajectory map video. When ``orientation_by_frame`` maps
+    ``(frame, track_id) -> (dx, dy)`` (unit map-space muzzle bearings from the
+    POD-orientation family), each tracked member additionally gets a
+    translucent black-bordered "person orientation" arrowhead at their
+    current position. Only the live arrow is drawn — orientation history is
+    deliberately NOT stamped into the trail (it cluttered the map)."""
+    from .orientation import draw_orientation_arrow
+
     inroom_ids = _normalize_inroom_ids(inroom_ids)
     predefined_colors, track_colors = _build_track_color_cache()
 
@@ -779,6 +788,12 @@ def annotate_map_video(
         for tid, mx, my in points_per_frame.get(frame_num, []):
             color = _get_track_color(tid, inroom_ids, track_colors, predefined_colors)
             _draw_point_with_border(temp_vis, (int(mx), int(my)), 8, color)
+
+            if orientation_by_frame:
+                d = orientation_by_frame.get((frame_num, tid))
+                if d is not None:
+                    draw_orientation_arrow(temp_vis, (mx, my), d, color,
+                                           size=26.0, alpha=0.55, border=2)
 
             if tid not in inroom_ids:
                 prev = last_pos.get(tid)

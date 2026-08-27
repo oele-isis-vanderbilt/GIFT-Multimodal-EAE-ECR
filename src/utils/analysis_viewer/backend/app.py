@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config as cfg
-from .routers import compare, media, runs, session, sidecars
+from .routers import adjustments, compare, media, runs, session, sidecars
 
 
 def create_app() -> FastAPI:
@@ -40,7 +40,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=False,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["Range", "Content-Type"],
         expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"],
     )
@@ -53,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(compare.router, prefix="/api")
+    app.include_router(adjustments.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:

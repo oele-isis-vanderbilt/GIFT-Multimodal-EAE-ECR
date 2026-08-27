@@ -51,6 +51,13 @@ from .metrics._shared import load_door_axes
 from .metrics.context import MetricContext
 from .metrics.metric import AbstractMetric
 from .analysis import build_analysis_session
+from .orientation import (
+    compute_pod_data,
+    pod_data_public,
+    render_pod_sectors_png,
+    save_orientation_cache,
+    save_pod_camera_frame,
+)
 from .utils.audio import attach_audio_in_place, has_audio_stream
 from .utils.config import load_config, load_vmeta
 from .utils.run_info import load_run_info, make_run_id, save_run_info
@@ -118,6 +125,8 @@ ENABLED_METRICS: Dict[str, bool] = {
     "EntranceHesitation_Metric": True,
     "TotalEntryTime_Metric": True,
     "MoveAlongWall_Metric": True,
+    "PodSectorCoverage_Metric": True,
+    "PodMutualFacing_Metric": True,
     "IdentifyAndCapturePods_Metric": False,
     "CapturePodTime_Metric": False,
     "ThreatClearance_Metric": False,
@@ -145,6 +154,10 @@ METRIC_COMPUTE_DEPS: Dict[str, frozenset] = {
     "EntranceVectors_Metric": frozenset(),
     "EntranceHesitation_Metric": frozenset(),
     "TotalEntryTime_Metric": frozenset(),
+    # The POD-orientation family runs unconditionally when its metrics are
+    # enabled (pure numpy over tracker output — no heavy video/gaze pass).
+    "PodSectorCoverage_Metric": frozenset(),
+    "PodMutualFacing_Metric": frozenset(),
     # MoveAlongWall reads pod_capture for per-track end-frames but treats it
     # as optional (empty dict → full scoring window). Per product spec wall
     # adherence is scored from frame 1 → drill_end_frame, so we deliberately
@@ -628,6 +641,8 @@ class ProcessingEngine:
             ("EntranceHesitation_Metric", EntranceHesitation_Metric),
             ("TotalEntryTime_Metric", TotalEntryTime_Metric),
             ("MoveAlongWall_Metric", MoveAlongWall_Metric),
+            ("PodSectorCoverage_Metric", PodSectorCoverage_Metric),
+            ("PodMutualFacing_Metric", PodMutualFacing_Metric),
             ("IdentifyAndCapturePods_Metric", IdentifyAndCapturePods_Metric),
             ("CapturePodTime_Metric", CapturePodTime_Metric),
             ("ThreatClearance_Metric", ThreatClearance_Metric),
@@ -1185,6 +1200,74 @@ class ProcessingEngine:
         save_position_cache(all_map_points, self.output_directory, self.video_basename)
         save_gaze_cache(gaze_info, self.output_directory, self.video_basename)
 
+        # ------------------------------------------------------------------
+        # POD-orientation family: per-frame body/muzzle bearings for every
+        # track, POD-establishment detection, and the two POD metrics. Runs
+        # whenever either pod_orientation metric is enabled. Pure numpy over
+        # the already-collected tracker output (no extra video pass).
+        # ------------------------------------------------------------------
+        pod_orientation_data = None
+        orientation_by_frame: Dict[Tuple[int, int], Tuple[float, float]] = {}
+        needs_pod_orientation = any(
+            ENABLED_METRICS.get(name, False)
+            for name in ("PodSectorCoverage_Metric", "PodMutualFacing_Metric")
+        )
+        if needs_pod_orientation and self.mapper is not None and self.boundary is not None:
+            try:
+                pod_orientation_data = compute_pod_data(
+                    tracker_output,
+                    self.mapper,
+                    fps,
+                    config,
+                    tracks_by_id,
+                    inroom_ids,
+                    drill_start_frame,
+                    drill_end_frame,
+                    self.boundary,
+                )
+                orient_series = pod_orientation_data["_orient"]
+                inroom_id_set = set(inroom_ids or [])
+                for entry in tracker_output:
+                    t = entry["frame"] - 1
+                    for obj in entry["objects"]:
+                        rec = orient_series.get(obj["id"])
+                        # Every tracked friendly gets a person-orientation
+                        # arrow (incl. extras beyond team_size); in-room
+                        # role players are excluded.
+                        if rec is None or obj["id"] in inroom_id_set:
+                            continue
+                        d = rec["muzzle_smooth"][t]
+                        if np.isfinite(d[0]):
+                            orientation_by_frame[(entry["frame"], obj["id"])] = (
+                                float(d[0]), float(d[1]),
+                            )
+                save_orientation_cache(
+                    os.path.join(
+                        self.output_directory,
+                        f"{self.video_basename}_OrientationCache.txt",
+                    ),
+                    tracker_output,
+                    orient_series,
+                )
+                if pod_orientation_data["status"] == "ok":
+                    logging.info(
+                        "POD established at frame %s (coverage %.2f, mutual facing %.2f)",
+                        pod_orientation_data["pod_frame"],
+                        pod_orientation_data["metrics"]["POD_SECTOR_COVERAGE"],
+                        pod_orientation_data["metrics"]["POD_MUTUAL_FACING"],
+                    )
+                else:
+                    logging.info(
+                        "POD establishment uncertain (%s)",
+                        pod_orientation_data.get("reason"),
+                    )
+            except Exception:
+                logging.exception("POD-orientation computation failed; metrics report -1")
+                pod_orientation_data = None
+                # Keep the map-video arrows consistent with the reported
+                # metrics: no pod data -> no orientation overlay.
+                orientation_by_frame = {}
+
         preserve_audio_enabled = (
             bool(config.get("preserve_audio", True))
             and has_audio_stream(config["video_path"])
@@ -1313,6 +1396,7 @@ class ProcessingEngine:
                 inroom_ids=inroom_ids,
                 start_frame=drill_start_frame,
                 end_frame=drill_end_frame,
+                orientation_by_frame=orientation_by_frame or None,
             )
 
         coverage_data = None
@@ -1480,6 +1564,7 @@ class ProcessingEngine:
             drill_end_frame=drill_end_frame,
             drill_window_meta=drill_window.to_dict(),
             pixel_mapper=self.mapper,
+            pod_orientation=pod_orientation_data,
         )
 
         # Clearance map + overlays were produced in the combined camera pass
@@ -1520,6 +1605,74 @@ class ProcessingEngine:
                 move_along_wall_metric = m
 
         save_metrics_cache(metric_scores, self.output_directory, self.video_basename)
+
+        # POD-orientation artifacts: the one-glance sectors snapshot, the
+        # POD-frame camera still (from the tracking overlay so IDs are
+        # visible), and the diagnostic JSON sidecar.
+        pod_sectors_path = None
+        pod_camera_path = None
+        if pod_orientation_data is not None:
+            try:
+                with open(
+                    os.path.join(
+                        self.output_directory,
+                        f"{self.video_basename}_PodOrientation.json",
+                    ),
+                    "w",
+                ) as f:
+                    from src.orientation import POD_JSON_SCHEMA_VERSION
+
+                    json.dump(
+                        {"schema_version": POD_JSON_SCHEMA_VERSION,
+                         **pod_data_public(pod_orientation_data)},
+                        f, indent=2,
+                    )
+                if pod_orientation_data["status"] == "ok":
+                    from .helper_functions import _build_track_color_cache, _get_track_color
+
+                    predefined_colors, color_cache = _build_track_color_cache()
+                    pod_colors = {
+                        tid: _get_track_color(tid, set(inroom_ids or []), color_cache, predefined_colors)
+                        for tid in pod_orientation_data["team_ids"]
+                    }
+                    pod_metrics_bundle = {
+                        "sectors": pod_orientation_data["_sectors"],
+                        "POD_SECTOR_COVERAGE": pod_orientation_data["metrics"]["POD_SECTOR_COVERAGE"],
+                        "POD_MUTUAL_FACING": pod_orientation_data["metrics"]["POD_MUTUAL_FACING"],
+                        "violators": pod_orientation_data["violators"],
+                        "flagged_pairs": pod_orientation_data["flagged_pairs"],
+                    }
+                    pod_sectors_path = os.path.join(
+                        self.output_directory, f"{self.video_basename}_POD_Sectors.png"
+                    )
+                    render_pod_sectors_png(
+                        pod_sectors_path,
+                        config["Map Image"],
+                        pod_orientation_data["_members"],
+                        pod_metrics_bundle,
+                        pod_colors,
+                        {"frame": pod_orientation_data["pod_frame"],
+                         "sec": pod_orientation_data["pod_sec"]},
+                        fps,
+                        pod_orientation_data["sector_angle_degrees"],
+                    )
+                    overlay_video = os.path.join(
+                        self.output_directory,
+                        f"{self.video_basename}_Tracking_Overlays.mp4",
+                    )
+                    if os.path.exists(overlay_video):
+                        pod_camera_path = save_pod_camera_frame(
+                            overlay_video,
+                            os.path.join(
+                                self.output_directory,
+                                f"{self.video_basename}_POD_CameraFrame.png",
+                            ),
+                            pod_orientation_data["pod_frame"],
+                            drill_start_frame,
+                            pod_orientation_data["pod_sec"],
+                        )
+            except Exception:
+                logging.exception("Failed to write POD-orientation artifacts")
 
         # When drill-window detection is enabled the transcription has
         # already run synchronously after the pose loop, so there is no
@@ -1574,14 +1727,18 @@ class ProcessingEngine:
                 drill_window=drill_window,
                 metric_flags=list(getattr(context, "metric_flags", []) or []),
                 move_along_wall=move_summary,
+                pod_orientation=(
+                    pod_data_public(pod_orientation_data)
+                    if pod_orientation_data is not None else None
+                ),
+                pod_sectors_path=pod_sectors_path,
+                pod_camera_path=pod_camera_path,
             )
-            analysis_session.setdefault("artifacts", {})
-            analysis_session["artifacts"]["metrics_cache"] = {
-                "path": metrics_cache_path,
-                "label": "Metrics Cache",
-                "type": "text",
-                "exists": os.path.exists(metrics_cache_path),
-            }
+            # v2 artifacts shape: flat path under the data section (matches
+            # the viewer's ArtifactsBlock mirror).
+            analysis_session.setdefault("artifacts", {}).setdefault("data", {})[
+                "metrics_cache"
+            ] = metrics_cache_path
 
             with open(analysis_json_path, "w") as f:
                 json.dump(analysis_session, f, indent=4)

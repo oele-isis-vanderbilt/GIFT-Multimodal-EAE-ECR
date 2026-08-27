@@ -1,3 +1,4 @@
+import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -374,6 +375,9 @@ def build_analysis_session(
     drill_window: Any = None,
     metric_flags: Optional[List[Dict[str, Any]]] = None,
     move_along_wall: Optional[Dict[str, Any]] = None,
+    pod_orientation: Optional[Dict[str, Any]] = None,
+    pod_sectors_path: Optional[str] = None,
+    pod_camera_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build the analysis-session payload (schema v2.0, metric-centric).
@@ -1103,7 +1107,387 @@ def build_analysis_session(
         elif isinstance(drill_window, dict):
             result["drill_window"] = drill_window
 
-    return _convert_to_v2_schema(result)
+    v2 = _convert_to_v2_schema(result)
+    if pod_orientation is not None:
+        attach_pod_block(v2, pod_orientation)
+        images = v2.setdefault("artifacts", {}).setdefault("images", {})
+        if pod_sectors_path and os.path.exists(pod_sectors_path):
+            images["pod_sectors"] = pod_sectors_path
+        if pod_camera_path and os.path.exists(pod_camera_path):
+            images["pod_camera"] = pod_camera_path
+    return v2
+
+
+def build_pod_block(pod_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Schema-v2 POD slices (metric records / timeline item / flags) from a
+    ``compute_pod_data`` / ``recompute_pod_for_run`` result (all times come
+    precomputed as ``pod_sec`` in the pod_data itself).
+
+    Shared by the engine's session build and the analysis-viewer backend's
+    instructor-adjustment recompute so both always emit the same shape.
+    """
+    status_ok = pod_data.get("status") == "ok"
+    pod_frame = pod_data.get("pod_frame")
+    pod_sec = pod_data.get("pod_sec")
+    members = pod_data.get("members") or []
+    pairs = pod_data.get("flagged_pairs") or []
+    violators = pod_data.get("violators") or []
+    source = pod_data.get("source", "auto")
+
+    flags: List[Dict[str, Any]] = []
+    item = None
+    if status_ok and pod_frame is not None:
+        pair_flag_ids = []
+        for p in pairs:
+            # Frame-scoped id: a deletion recorded at one POD frame must never
+            # silently suppress the (semantically different) flag recomputed
+            # for the same member pair at another instructor-set frame.
+            fid = f"pod_flagging_{p['from']}_{p['to']}_f{int(pod_frame)}"
+            pair_flag_ids.append(fid)
+            flags.append({
+                "flag_id": fid,
+                "metric_id": "pod_mutual_facing",
+                "linked_item_id": "pod_establishment",
+                "type": "pod_flagging",
+                "severity": "warning",
+                "frame": int(pod_frame),
+                "time_sec": pod_sec,
+                "track_id": int(p["from"]),
+                "target_id": int(p["to"]),
+                "angle_off_deg": p.get("angle_off_deg"),
+                "title": f"Teammate in sector of fire: member {p['to']} (member {p['from']}'s sector)",
+                "message": (
+                    f"At the POD frame, member {p['to']} is inside member "
+                    f"{p['from']}'s sector of fire — member {p['from']}'s muzzle "
+                    f"bearing passes within {p.get('angle_off_deg', '?')}° of "
+                    f"teammate {p['to']}."
+                ),
+            })
+        establish_flag = {
+            # Distinct from the timeline item's id ("pod_establishment") —
+            # the viewer keeps items and flags in one selection registry.
+            # Session-level (like the drill marks): the POD establishment is
+            # an event of the run, not a property of one metric.
+            "flag_id": "pod_establishment_flag",
+            "metric_id": None,
+            "linked_item_id": "pod_establishment",
+            "type": "pod_establishment",
+            "severity": "info",
+            "frame": int(pod_frame),
+            "time_sec": pod_sec,
+            "title": ("POD established (instructor-set)" if source == "instructor"
+                      else "POD established"),
+            "message": (
+                f"Team point-of-dominance mark at frame {pod_frame} "
+                f"({'auto-detected first collective hold' if source == 'auto' else 'instructor-set'})."
+            ),
+            "source": source,
+        }
+        flags.insert(0, establish_flag)
+        coverage_score = (pod_data.get("metrics") or {}).get("POD_SECTOR_COVERAGE")
+        try:
+            pct = f"{float(coverage_score):.0%}"
+        except (TypeError, ValueError):
+            pct = "?"
+        flags.insert(1, {
+            # Mandatory metric flag: sector coverage has no violation notion,
+            # so its one flag simply carries the result (area ratio).
+            "flag_id": "pod_coverage_flag",
+            "metric_id": "pod_sector_coverage",
+            "linked_item_id": "pod_establishment",
+            "type": "pod_coverage",
+            "severity": "info",
+            "frame": int(pod_frame),
+            "time_sec": pod_sec,
+            "title": f"Sector coverage: {pct} of the room",
+            "message": (
+                f"At the POD frame the union of the team's sectors of fire "
+                f"covers {pct} of the room area (sector angle "
+                f"{pod_data.get('sector_angle_degrees')}°)."
+            ),
+        })
+    else:
+        # Uncertain runs still get an info flag so the viewer's flag list
+        # carries the POD status and its Set/Adjust affordance. The wording
+        # distinguishes an instructor-set frame that could not be scored from
+        # a failed automatic detection (with or without a candidate pause).
+        if source == "instructor":
+            title = "POD set, but not scoreable"
+            message = (
+                f"The instructor-set POD frame {pod_frame} has fewer than two "
+                "members with a reliable orientation there, so sector coverage "
+                "and mutual facing are unavailable. Adjust the frame to a "
+                "moment where more members are tracked."
+            )
+            flag_frame, flag_sec = pod_frame, pod_sec
+        elif pod_frame is not None:
+            title = "POD not established"
+            message = (
+                f"A collective pause was detected at frame {pod_frame}, but "
+                "fewer than two members had a reliable orientation there, so "
+                "the POD was not established. Use Adjust to set the frame "
+                "manually — orientation data for the whole video is available."
+            )
+            flag_frame, flag_sec = None, None
+        else:
+            title = "POD not identified"
+            message = (
+                f"No POD establishment was detected automatically "
+                f"({pod_data.get('reason') or 'no collective pause found'}). "
+                "Use Set to mark the frame manually — orientation data for the "
+                "whole video is available."
+            )
+            flag_frame, flag_sec = None, None
+        flags.append({
+            "flag_id": "pod_establishment_flag",
+            "metric_id": None,
+            "linked_item_id": None,
+            "type": "pod_establishment",
+            "severity": "info",
+            "frame": int(flag_frame) if flag_frame is not None else None,
+            "time_sec": flag_sec,
+            "title": title,
+            "message": message,
+            "source": source,
+        })
+    if status_ok and pod_frame is not None:
+        item = {
+            "item_id": "pod_establishment",
+            "metric_id": "pod_sector_coverage",
+            "kind": "pod_establishment",
+            "label": "POD",
+            "frame": int(pod_frame),
+            "time_sec": pod_sec,
+            "flag_ids": ["pod_establishment_flag", "pod_coverage_flag"] + pair_flag_ids,
+            "data": {
+                "source": source,
+                "member_count": len(members),
+                "sector_angle_degrees": pod_data.get("sector_angle_degrees"),
+            },
+        }
+
+    coverage_summary = {
+        "pod_frame": int(pod_frame) if pod_frame is not None else None,
+        "pod_time_sec": pod_sec,
+        "source": source,
+        "sector_angle_degrees": pod_data.get("sector_angle_degrees"),
+        "members": members,
+        "sectors": pod_data.get("sectors") or {},
+        "excluded_members": pod_data.get("excluded_members") or [],
+    }
+    if not status_ok:
+        coverage_summary["reason"] = pod_data.get("reason")
+
+    scores = pod_data.get("metrics") or {}
+    metrics = [
+        {
+            "metric_id": "pod_sector_coverage",
+            "label": "POD Sector Coverage",
+            "score": scores.get("POD_SECTOR_COVERAGE", -1),
+            "uncertain": not status_ok,
+            "summary": coverage_summary,
+            "timeline_item_ids": ["pod_establishment"] if item else [],
+            "flag_ids": ["pod_coverage_flag"] if item else [],
+        },
+        {
+            "metric_id": "pod_mutual_facing",
+            "label": "POD Mutual Facing",
+            "score": scores.get("POD_MUTUAL_FACING", -1),
+            "uncertain": not status_ok,
+            "summary": {
+                "violators": violators,
+                "pairs": pairs,
+                "member_count": len(members),
+                "sector_angle_degrees": pod_data.get("sector_angle_degrees"),
+            },
+            "timeline_item_ids": ["pod_establishment"] if item else [],
+            "flag_ids": [f["flag_id"] for f in flags if f["type"] == "pod_flagging"],
+        },
+    ]
+    return {"metrics": metrics, "timeline_item": item, "flags": flags}
+
+
+POD_METRIC_IDS = ("pod_sector_coverage", "pod_mutual_facing")
+POD_FLAG_TYPES = ("pod_establishment", "pod_coverage", "pod_flagging")
+
+
+def attach_pod_block(v2: Dict[str, Any], pod_data: Dict[str, Any]) -> None:
+    """Splice (or replace) the POD slices inside a schema-v2 payload."""
+    block = build_pod_block(pod_data)
+    v2["metrics"] = [
+        m for m in (v2.get("metrics") or []) if m.get("metric_id") not in POD_METRIC_IDS
+    ] + block["metrics"]
+    v2["flags"] = [
+        f for f in (v2.get("flags") or []) if f.get("type") not in POD_FLAG_TYPES
+    ] + block["flags"]
+    items = [
+        it for it in (v2.get("timeline") or {}).get("items", [])
+        if it.get("item_id") != "pod_establishment"
+    ]
+    if block["timeline_item"] is not None:
+        items.append(block["timeline_item"])
+    v2.setdefault("timeline", {})["items"] = items
+
+
+def apply_flag_deletion_recalcs(v2: Dict[str, Any],
+                                binned: List[Dict[str, Any]]) -> None:
+    """Recalculate every affected metric after instructor flag deletions.
+
+    An instructor deletes a flag to say "this detected violation is wrong —
+    ignore it when scoring". Each metric has its own ignore semantics:
+
+    - pod_flagging            -> POD_MUTUAL_FACING from remaining pairs.
+    - wall_too_close/too_far  -> credit the excursion's frames back to the
+                                 entrant (per-frame safe/observed score) and
+                                 drop the linked wall_excursion timeline item.
+    - pair_time_violation     -> that entry pair scores 1.0 in the
+                                 ENTRANCE_HESITATION mean.
+    - vector_direction_violation -> that transition counts as an alternation
+                                 in ENTRANCE_VECTORS (alternations/transitions).
+    - total_entry_time_violation -> TOTAL_TIME_OF_ENTRY becomes 1.0.
+    - vector_unknown          -> display-only (no direction can be invented),
+                                 no score change.
+
+    Deletions are non-destructive: they are applied to a freshly-loaded
+    payload on every load, so restoring a flag simply stops applying them.
+    """
+    if not binned:
+        return
+    metrics = {m.get("metric_id"): m for m in v2.get("metrics") or []}
+    items = (v2.get("timeline") or {}).get("items", [])
+    item_by_id = {it.get("item_id"): it for it in items}
+    fps = float((v2.get("video") or {}).get("frame_rate") or 30.0)
+    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for f in binned:
+        by_type.setdefault(str(f.get("type")), []).append(f)
+
+    if "pod_flagging" in by_type:
+        recalc_mutual_facing_from_flags(v2)
+
+    wall_flags = by_type.get("wall_too_close", []) + by_type.get("wall_too_far", [])
+    metric = metrics.get("move_along_wall")
+    if wall_flags and metric is not None:
+        summary = metric.setdefault("summary", {})
+        per_entrant = summary.get("per_entrant") or []
+        by_track = {int(e["track_id"]): e for e in per_entrant if e.get("track_id") is not None}
+        removed_item_ids = set()
+        for f in wall_flags:
+            tid = f.get("track_id")
+            e = by_track.get(int(tid)) if tid is not None else None
+            if e is None or f.get("start_frame") is None or f.get("end_frame") is None:
+                continue
+            frames = max(0, int(f["end_frame"]) - int(f["start_frame"]) + 1)
+            key = "too_close_frames" if f["type"] == "wall_too_close" else "too_far_frames"
+            tkey = "too_close_time_sec" if f["type"] == "wall_too_close" else "too_far_time_sec"
+            e[key] = max(0, int(e.get(key) or 0) - frames)
+            e[tkey] = round(e[key] / fps, 3)
+            observed = int(e.get("observed_frames") or 0)
+            if observed > 0:
+                e["score"] = (observed - int(e.get("too_close_frames") or 0)
+                              - int(e.get("too_far_frames") or 0)) / observed
+            if f.get("linked_item_id"):
+                removed_item_ids.add(f["linked_item_id"])
+        scores = [float(e["score"]) for e in per_entrant
+                  if int(e.get("observed_frames") or 0) > 0]
+        if scores:
+            metric["score"] = round(sum(scores) / len(scores), 2)
+        summary["excursion_count"] = max(
+            0, int(summary.get("excursion_count") or 0) - len(wall_flags))
+        summary["total_too_close_time_sec"] = round(
+            sum(float(e.get("too_close_time_sec") or 0.0) for e in per_entrant), 3)
+        summary["total_too_far_time_sec"] = round(
+            sum(float(e.get("too_far_time_sec") or 0.0) for e in per_entrant), 3)
+        if removed_item_ids:
+            v2.setdefault("timeline", {})["items"] = [
+                it for it in items if it.get("item_id") not in removed_item_ids
+            ]
+            items = v2["timeline"]["items"]
+            item_by_id = {it.get("item_id"): it for it in items}
+            # Keep the metric's cross-refs consistent with the pruned items.
+            metric["timeline_item_ids"] = [
+                iid for iid in (metric.get("timeline_item_ids") or [])
+                if iid not in removed_item_ids
+            ]
+
+    pair_flags = by_type.get("pair_time_violation", [])
+    metric = metrics.get("entrance_hesitation")
+    if pair_flags and metric is not None:
+        ignored_items = {f.get("linked_item_id") for f in pair_flags}
+        pair_scores: List[float] = []
+        for it in items:
+            if it.get("kind") != "pair_gap":
+                continue
+            data = it.get("data") or {}
+            if it.get("item_id") in ignored_items:
+                pair_scores.append(1.0)
+                data["violates_time_limit"] = False
+                continue
+            gap = float(data.get("gap_sec") or 0.0)
+            allowed = float(data.get("allowed_gap_sec") or 0.0)
+            over = max(0.0, gap - allowed)
+            pair_scores.append(math.exp(-(over ** 2) / 0.5))
+        if pair_scores:
+            metric["score"] = round(sum(pair_scores) / len(pair_scores), 2)
+        summary = metric.setdefault("summary", {})
+        summary["violation_count"] = max(
+            0, int(summary.get("violation_count") or 0) - len(pair_flags))
+
+    dir_flags = by_type.get("vector_direction_violation", [])
+    metric = metrics.get("entrance_vectors")
+    if dir_flags and metric is not None:
+        summary = metric.setdefault("summary", {})
+        transitions = int(summary.get("transition_count") or 0)
+        if transitions > 0:
+            alt = min(transitions,
+                      int(summary.get("alternation_count") or 0) + len(dir_flags))
+            summary["alternation_count"] = alt
+            metric["score"] = round(alt / transitions, 2)
+
+    total_flags = by_type.get("total_entry_time_violation", [])
+    metric = metrics.get("total_time_of_entry")
+    if total_flags and metric is not None:
+        metric["score"] = 1.0
+        summary = metric.setdefault("summary", {})
+        summary["violates_total_entry_limit"] = False
+        duration_item = item_by_id.get("total_entry_duration")
+        if duration_item is not None:
+            (duration_item.get("data") or {})["violates_total_entry_limit"] = False
+
+
+def recalc_mutual_facing_from_flags(v2: Dict[str, Any]) -> None:
+    """Re-derive the POD_MUTUAL_FACING score from the pod_flagging flags
+    still present in the payload (used after an instructor deletes or
+    restores a flag): score = 1 − violators / member count."""
+    metric = next(
+        (m for m in v2.get("metrics", []) if m.get("metric_id") == "pod_mutual_facing"),
+        None,
+    )
+    if metric is None or metric.get("uncertain"):
+        return
+    coverage = next(
+        (m for m in v2.get("metrics", []) if m.get("metric_id") == "pod_sector_coverage"),
+        None,
+    )
+    member_count = len((coverage or {}).get("summary", {}).get("members") or []) or int(
+        metric.get("summary", {}).get("member_count") or 0
+    )
+    remaining = [
+        f for f in v2.get("flags", []) if f.get("type") == "pod_flagging"
+    ]
+    violators = sorted({int(f["track_id"]) for f in remaining if f.get("track_id") is not None})
+    pairs = [
+        {
+            "from": int(f["track_id"]),
+            "to": int(f.get("target_id", -1)),
+            "angle_off_deg": f.get("angle_off_deg"),
+        }
+        for f in remaining
+        if f.get("track_id") is not None
+    ]
+    metric["score"] = round(1.0 - (len(violators) / member_count), 2) if member_count else 1.0
+    metric.setdefault("summary", {})["violators"] = violators
+    metric["summary"]["pairs"] = pairs
+    metric["flag_ids"] = [f["flag_id"] for f in remaining]
 
 
 def _attach_wall_band_polygons(
@@ -1562,7 +1946,5 @@ def _v2_restructure_artifacts(v1_artifacts: Dict[str, Any]) -> Dict[str, Any]:
         data["position_cache"] = p
     if (p := path(v1_artifacts.get("gaze_cache"))):
         data["gaze_cache"] = p
-    if (p := path(v1_artifacts.get("metrics_cache"))):
-        data["metrics_cache"] = p
 
     return {"videos": videos, "images": images, "data": data}

@@ -16,6 +16,7 @@ Python integration engine for processing session videos using metadata in a `.vm
 - [Config file](#config-file-spaceenvironment-metadata)
 - [Running the engine](#running-the-engine-backend)
 - [Running locally](#running-the-local-engine-without-gift)
+- [POD establishment & orientation metrics](#pod-establishment--orientation-metrics)
 
 ## Requirements
 
@@ -357,6 +358,8 @@ Cross-platform desktop viewer for `{basename}_Analysis.json` (Tauri shell + Vue 
 
 A **Compare** toggle in the central pane swaps the video stage for a side-by-side comparison view: pick any other run from the same outputs folder (expert runs are flagged automatically), pick a metric, and see your score vs the reference, the saved per-metric visualizations, and a plain-English summary. Grading is relative to the chosen reference run — not an absolute threshold — because what counts as "good" varies room-to-room.
 
+The viewer is also where **instructor adjustments** happen: deleting wrong flags into a restorable bin (scores re-derive live), setting/adjusting the POD establishment frame, and adjusting the drill end — see [Instructor adjustments in the Analysis Viewer](#instructor-adjustments-in-the-analysis-viewer).
+
 > **Node.js is auto-installed** on first launch — see [Node.js is auto-installed](#nodejs-is-auto-installed). No manual Node setup is needed.
 
 ### Run
@@ -660,6 +663,7 @@ If you reorganize folders, update these paths accordingly.
 
 - `coverage_time_threshold`: seconds of sustained coverage needed for full score in `TOTAL_FLOOR_COVERAGE_TIME`.
 - `stay_along_wall_pWall`: sensitivity/threshold for the `STAY_ALONG_WALL` metric (higher is typically stricter wall adherence).
+- `pod_sector_angle_degrees` (default `20`): full apex angle of each member's sector-of-fire triangle for the POD orientation metrics (`POD_SECTOR_COVERAGE` / `POD_MUTUAL_FACING`). This is deliberately the **only** POD-orientation knob — pause detection and orientation estimation are fully automatic (see [POD establishment & orientation metrics](#pod-establishment--orientation-metrics)).
 
 ##### Gaze keypoints
 
@@ -749,3 +753,44 @@ python run_engine_local.py input/test.vmeta.xml --verbose
 # Force transcode and write this run's outputs into its own folder
 python run_engine_local.py input/test.vmeta.xml --force_transcode --output_path ./output/run1/
 ```
+
+## POD establishment & orientation metrics
+
+When the team enters the room and takes up its first collective hold, that moment is treated as the **point-of-dominance (POD) establishment**. The engine detects it automatically, estimates each member's **muzzle direction** from the pose skeleton, and scores two metrics at that single frame:
+
+- **`POD_SECTOR_COVERAGE`** — the union of every member's sector-of-fire triangle (apex at the member, opening along the muzzle bearing, apex angle `pod_sector_angle_degrees`), intersected with the room polygon, divided by the room area. *"How much of the room does the team cover?"*
+- **`POD_MUTUAL_FACING`** — `1 − violators / team_size`, where a violator is a member whose sector of fire contains at least one teammate. *"Is anyone covering their own team?"* Each violating pair raises a "teammate in sector of fire" flag.
+
+Both report `-1` (and the run is marked **uncertain**) when no collective pause is found or fewer than two members have reliable orientations at the detected frame — the instructor can then set the frame manually in the Analysis Viewer.
+
+### How it works (in plain English)
+
+- **Pause detection** is parameter-free: per-member map speed is measured as net displacement over 0.5 s (so shuffling in place doesn't count as movement), the team-max speed distribution is split with Otsu's method, and the first sustained everyone-slow interval after the last member enters is the POD. A speed-contrast gate refuses to "find" a pause in runs where the team never actually stops.
+- **Body facing** comes from paired same-height keypoints (shoulders, hips, heel→toe) projected through the floor homography and differenced — the pairing cancels the height parallax, which makes the body bearing fully camera-angle invariant. Left/right keypoint labels resolve which way is forward.
+- **Muzzle direction** fuses four arm cues (wrist↔wrist grip axis signed by chest distance, both forearms, chest→hands). This cue set was chosen empirically over a "fully camera-invariant" wrist-only variant: A/B on two opposite-corner camera mounts showed the fusion is more accurate and far more stable frame-to-frame. A fused estimate pointing behind the shooter is discarded for the body facing.
+- **Supported camera envelope**: elevated room-corner/wall mounts (≈3 m and up — the standard GIFT room setup), validated on two near-opposite-corner POVs. Body facing is POV-invariant regardless of mount; `test_orientation_invariance.py` (768 synthetic camera/map/facing combinations) locks these guarantees.
+
+### Run artifacts
+
+| File | What it is |
+| --- | --- |
+| `{base}_PodOrientation.json` | POD frame, member bearings, both scores, flagged pairs, sector geometry (`schema_version` stamped) |
+| `{base}_OrientationCache.txt` | Per-frame smoothed body/muzzle bearings per track (lets the viewer recompute POD at any frame with no video/pose model) |
+| `{base}_POD_Sectors.png` | Map render of the sectors, bearings, and both scores at the POD frame |
+| `{base}_POD_CameraFrame.png` | The camera frame at POD establishment (with tracking overlays) |
+| `{base}_Tracking_Map.mp4` | The map video additionally shows each member's live orientation arrow |
+
+### Replay from caches (no video / pose model)
+
+```bash
+# Recompute POD + artifacts for an existing run folder (e.g. after changing the sector angle)
+python -m src.orientation output/output1 --sector-angle 25
+```
+
+### Instructor adjustments in the Analysis Viewer
+
+All adjustments live in the flag list (each info flag row carries its action) and are stored in a sidecar `{base}_AnalysisOverrides.json` next to the engine's Analysis.json — the engine output itself is never modified, and every adjustment recomputes the affected scores live from the run caches:
+
+- **POD establishment** — *Adjust* (or *Set…* on uncertain runs) enters a drag/tap marker mode on the timeline against the original video; confirming recomputes sectors and both POD scores at the chosen frame.
+- **Drill end** — *Adjust* moves the drill-end mark; every window-dependent metric (entry metrics, wall, POD) recomputes, with validation (end must be after start) and an explicit warning when the new end invalidates the established POD.
+- **Flag deletion** — any violation flag can be deleted into a restorable bin; the owning metric's score is re-derived with that violation ignored (each metric has its own ignore semantics), and restoring reverts it.

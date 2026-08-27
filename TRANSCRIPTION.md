@@ -64,7 +64,7 @@ audio through — the pipeline never breaks.
 | `drill_window_enabled` | true | Auto-detect drill start/end and trim to it |
 | `stop_at_drill_end` | true | Stop the frame loop at the located end |
 | `asr_backend` | `parakeet` | ASR engine |
-| `transcription_device` | `cpu` | NeMo device (MPS not supported; cpu on Apple Silicon) |
+| `transcription_device` | `cpu` | NeMo device: `cpu`, `cuda`, or `mps` (`mps` verified ~15× faster per pass on Apple Silicon; default stays `cpu`) |
 | `transcription_preroll_sec` | 5.0 | Audio context before the drill start |
 | `asr_stream_chunk_sec` | 8.0 | Forward chunk size per pass |
 | `asr_stream_confirm_sec` | 3.0 | Shorter chunk to confirm a tentative end |

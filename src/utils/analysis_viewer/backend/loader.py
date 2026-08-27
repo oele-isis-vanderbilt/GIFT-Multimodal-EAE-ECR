@@ -96,7 +96,57 @@ def load_session(json_path: str) -> Dict[str, Any]:
 
     data["session_json_path"] = abs_path
     data["resolved_video_path"] = resolved_video
+
+    # Instructor-owned adjustments (POD frame override, drill-end override,
+    # deleted flags) layer on top of the engine's immutable Analysis.json.
+    from .overrides import apply_overrides
+
+    apply_overrides(data)
+    _attach_drill_info_flags(data)
     return data
+
+
+def _attach_drill_info_flags(data: Dict[str, Any]) -> None:
+    """Synthesize info flags for the drill start/end so they appear in the
+    flag list (click-to-seek); works for legacy sessions too. The end flag
+    reflects any instructor override applied above."""
+    dw = data.get("drill_window") or {}
+    fps = float((data.get("video") or {}).get("frame_rate") or 30.0)
+    flags = data.setdefault("flags", [])
+    existing = {f.get("flag_id") for f in flags}
+    start = dw.get("start_frame")
+    end = dw.get("end_frame")
+    if start is not None and "drill_start_info" not in existing:
+        flags.insert(0, {
+            "flag_id": "drill_start_info",
+            "metric_id": None,
+            "linked_item_id": None,
+            "type": "drill_start",
+            "severity": "info",
+            "frame": int(start),
+            "time_sec": dw.get("start_time_sec", (int(start) - 1) / fps),
+            "title": f"Drill start · frame {start}",
+            "message": "Drill start detected from the tracker's first entry crossing.",
+        })
+    if end is not None and "drill_end_info" not in existing:
+        adjusted = dw.get("source") == "instructor"
+        uncertain = bool(dw.get("end_uncertain"))
+        suffix = " (instructor-adjusted)" if adjusted else (" (uncertain)" if uncertain else "")
+        flags.insert(1 if start is not None else 0, {
+            "flag_id": "drill_end_info",
+            "metric_id": None,
+            "linked_item_id": None,
+            "type": "drill_end",
+            "severity": "info",
+            "frame": int(end),
+            "time_sec": dw.get("end_time_sec", int(end) / fps),
+            "title": f"Drill end · frame {end}{suffix}",
+            "message": (
+                "Instructor-adjusted drill end; window-dependent metrics were recomputed."
+                if adjusted else
+                "Drill end located from the 'room clear' callout in the audio."
+            ),
+        })
 
 
 def _attach_run_info(json_path: str, data: Dict[str, Any]) -> None:

@@ -4,6 +4,7 @@
       v-if="session.session"
       class="compare-toggle"
       :class="{ active: ui.viewMode === 'compare' }"
+      :disabled="ui.podAdjustActive"
       :title="ui.viewMode === 'compare' ? 'Switch to analysis mode' : 'Switch to compare mode'"
       @click="ui.viewMode = ui.viewMode === 'compare' ? 'analysis' : 'compare'"
     >

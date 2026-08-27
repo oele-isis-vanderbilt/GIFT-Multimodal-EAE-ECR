@@ -14,6 +14,7 @@ const HEX = {
 
   severityWarning: '#fdba74',
   severityError: '#ef4444',
+  severityInfo: '#93c5fd',
 } as const;
 
 export const METRIC_COLOR: Record<string, string> = {
@@ -21,6 +22,8 @@ export const METRIC_COLOR: Record<string, string> = {
   entrance_hesitation: HEX.metricHesitation,
   total_time_of_entry: HEX.metricTotalEntry,
   move_along_wall: HEX.metricMoveAlongWall,
+  pod_sector_coverage: '#c084fc',
+  pod_mutual_facing: '#fbbf24', // amber — the wall metric already owns the pink
 };
 
 export function metricColor(metricId: string | null | undefined): string {
@@ -35,6 +38,7 @@ export function metricColorInt(metricId: string | null | undefined): number {
 export const SEVERITY_COLOR: Record<string, string> = {
   warning: HEX.severityWarning,
   error: HEX.severityError,
+  info: HEX.severityInfo,
 };
 
 export const BASELINE_ENTRY_COLOR_INT = hexToInt(HEX.baselineEntry);

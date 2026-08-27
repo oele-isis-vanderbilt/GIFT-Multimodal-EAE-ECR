@@ -43,14 +43,30 @@
         <button class="zoom-btn" title="Fit to range" @click="onFit">Fit</button>
         <button class="zoom-btn" title="Zoom in" @click="onZoomIn">+</button>
       </div>
-      <span class="hint muted">Swipe, drag, or scroll to navigate · tap an empty track to seek</span>
+      <template v-if="ui.podAdjustActive">
+        <span class="hint pod-adjust-hint" :class="{ 'drill-kind': ui.podAdjustKind === 'drill_end' }">
+          {{ ui.podAdjustKind === 'drill_end' ? 'Adjusting drill end' : 'Adjusting POD' }}
+          · drag the marker or tap the track · frame {{ ui.podAdjustFrame ?? '—' }}
+        </span>
+        <button
+          class="zoom-btn pod-confirm"
+          :disabled="session.mutating || ui.podAdjustFrame == null"
+          @click="onPodConfirm"
+        >
+          {{ session.mutating ? 'Saving…' : 'Confirm' }}
+        </button>
+        <button class="zoom-btn pod-cancel" :disabled="session.mutating" @click="onPodCancel">
+          Cancel
+        </button>
+      </template>
+      <span v-else class="hint muted">Swipe, drag, or scroll to navigate · tap an empty track to seek</span>
       <span class="range-readout muted">{{ rangeLabel }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useSessionStore } from '@/stores/session';
 import { usePlaybackStore } from '@/stores/playback';
 import { useUIStore } from '@/stores/ui';
@@ -103,6 +119,10 @@ let panMoved = false;
 let panCanScroll = false;
 
 function onTlPointerDown(ev: PointerEvent): void {
+  // POD-adjust mode: the marker drag owns the pointer — suppress
+  // drag-to-pan so touch/pen dragging doesn't pan and drag simultaneously.
+  // (Wheel / scrollbar navigation stays available.)
+  if (ui.podAdjustActive) return;
   if (ev.pointerType === 'mouse' && ev.button !== 0) return;
   panId = ev.pointerId;
   panStartX = ev.clientX;
@@ -174,6 +194,10 @@ onMounted(async () => {
     onLayoutChanged: (labels) => {
       metricLabels.value = labels;
     },
+    onPodDragPreview: (frame) => {
+      ui.podAdjustFrame = frame;
+      throttledSeek(frame);
+    },
   });
 
   // The label gutter is a sibling of the canvas container, not a child.
@@ -220,6 +244,7 @@ function pushData(): void {
         }
       : null,
     totalFrames: session.session.video.total_frames,
+    metricIds: session.session.metrics.map((m) => m.metric_id),
   });
 }
 
@@ -279,6 +304,11 @@ function itemTooltipLabel(item: TimelineItem | undefined): string | null {
     const human = item.data.label_kind === 'too_close' ? 'too close' : 'too far';
     return `${item.label} · ${human} for ${item.data.duration_sec.toFixed(2)}s · ${item.time_sec.toFixed(2)}s`;
   }
+  if (item.kind === 'pod_establishment') {
+    const src = item.data.source === 'instructor' ? 'instructor-set' : 'auto-detected';
+    const t = item.time_sec != null ? ` · ${item.time_sec.toFixed(2)}s` : '';
+    return `POD established · frame ${item.frame}${t} · ${src}`;
+  }
   return null;
 }
 
@@ -320,18 +350,27 @@ watch(
 watch(
   () => ui.selectedFlagId,
   (id) => {
-    if (id) {
+    const flag = id ? session.flagById.get(id) : null;
+    const isInfo = flag?.severity === 'info';
+    if (id && flag && !isInfo) {
       // Force the flag's owning metric visible — otherwise the flag (and the
       // row that hosts it) isn't in the layout, and the auto-scroll below
       // would land on nothing. Matches user intent: picking a flag is an
-      // implicit "show me this".
-      const flag = session.flagById.get(id);
-      if (flag?.metric_id && !ui.isMetricVisible(flag.metric_id)) {
+      // implicit "show me this". Info flags (POD establishment, drill
+      // start/end) deliberately do NOT toggle metric rows on.
+      if (flag.metric_id && !ui.isMetricVisible(flag.metric_id)) {
         ui.setMetricVisibility(flag.metric_id, true);
+        // The visibility watcher applies pre-flush on the NEXT tick; scrolling
+        // now would measure the stale layout (row not there yet) and no-op.
+        scene?.setSelectedFlag(id);
+        void nextTick(() => {
+          if (ui.selectedFlagId === id) scene?.scrollToFlag(id);
+        });
+        return;
       }
     }
     scene?.setSelectedFlag(id);
-    if (id) scene?.scrollToFlag(id);
+    if (id && !isInfo) scene?.scrollToFlag(id);
   },
 );
 watch(
@@ -342,6 +381,114 @@ watch(
   () => playback.currentFrame,
   (f) => scene?.setCurrentFrame(f),
 );
+
+// --- POD-frame adjustment ---------------------------------------------------
+
+// Seeking the <video> on every pointermove overwhelms it. Leading+trailing
+// throttle: the first drag update seeks immediately (responsive), and while
+// dragging the latest position is re-issued every 80 ms so the main video
+// scrubs smoothly with the marker.
+const SEEK_THROTTLE_MS = 80;
+let seekTimer: number | null = null;
+let pendingSeekFrame: number | null = null;
+let lastSeekIssued: number | null = null;
+
+function issuePendingSeek(): void {
+  seekTimer = null;
+  if (pendingSeekFrame != null && pendingSeekFrame !== lastSeekIssued) {
+    lastSeekIssued = pendingSeekFrame;
+    playback.requestSeek(pendingSeekFrame);
+    pendingSeekFrame = null;
+    seekTimer = window.setTimeout(issuePendingSeek, SEEK_THROTTLE_MS);
+  } else {
+    pendingSeekFrame = null;
+  }
+}
+
+function throttledSeek(frame: number): void {
+  if (seekTimer == null) {
+    lastSeekIssued = frame;
+    playback.requestSeek(frame);
+    seekTimer = window.setTimeout(issuePendingSeek, SEEK_THROTTLE_MS);
+  } else {
+    pendingSeekFrame = frame;
+  }
+}
+
+let podAdjustWasActive = false;
+watch(
+  () => [ui.podAdjustActive, ui.podAdjustFrame, ui.podAdjustKind] as const,
+  ([active, frame, kind]) => {
+    if (active && frame != null) {
+      scene?.setPodAdjust({ frame, kind });
+      if (!podAdjustWasActive) {
+        // Entering adjust: bring the mark into comfortable view (matters
+        // when zoomed in and the mark sits at the far end of the timeline).
+        scene?.centerOnFrame(frame);
+      }
+    } else {
+      scene?.setPodAdjust(null);
+    }
+    podAdjustWasActive = Boolean(active);
+  },
+);
+
+// window.confirm is a no-op (always false) inside the Tauri webview — use
+// the dialog plugin there, falling back to the browser dialog on the web.
+async function confirmDialog(message: string): Promise<boolean> {
+  const isTauri =
+    typeof window !== 'undefined' &&
+    ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+  if (isTauri) {
+    try {
+      const { confirm } = await import('@tauri-apps/plugin-dialog');
+      return await confirm(message, { kind: 'warning' });
+    } catch {
+      return true; // dialog plugin unavailable: don't block the action
+    }
+  }
+  return window.confirm(message);
+}
+
+async function onPodConfirm(): Promise<void> {
+  const frame = ui.podAdjustFrame;
+  if (frame == null) return;
+  if (ui.podAdjustKind === 'drill_end') {
+    const podFrame = podFrameOf();
+    if (
+      podFrame != null &&
+      frame <= podFrame &&
+      !(await confirmDialog(
+        `The new drill end (frame ${frame}) is at/before the established POD ` +
+          `(frame ${podFrame}). POD will be re-detected inside the new window ` +
+          `and may become not-established. Continue?`,
+      ))
+    ) {
+      return;
+    }
+    const ok = await session.adjustDrillEnd(frame);
+    if (ok) {
+      ui.exitPodAdjust();
+      playback.requestSeek(frame);
+    }
+    return;
+  }
+  const ok = await session.adjustPodFrame(frame);
+  if (ok) {
+    ui.exitPodAdjust();
+    playback.requestSeek(frame);
+  }
+}
+
+function podFrameOf(): number | null {
+  const m = session.metricById.get('pod_sector_coverage');
+  if (!m || m.metric_id !== 'pod_sector_coverage') return null;
+  return m.summary.pod_frame;
+}
+
+function onPodCancel(): void {
+  ui.exitPodAdjust();
+}
 
 function onZoomIn(): void {
   scene?.zoomBy(1.4);
@@ -370,6 +517,7 @@ onBeforeUnmount(() => {
     c.removeEventListener('pointercancel', onTlPointerUp);
   }
   if (rippleTimer != null) clearTimeout(rippleTimer);
+  if (seekTimer != null) clearTimeout(seekTimer);
   scene?.destroy();
   scene = null;
 });
@@ -495,6 +643,30 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   overflow: hidden;
 }
+.pod-adjust-hint {
+  color: #c084fc;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pod-adjust-hint.drill-kind {
+  color: #86efac;
+}
+.pod-confirm {
+  border: 1px solid #c084fc !important;
+  border-radius: 4px;
+  color: #c084fc !important;
+  font-weight: 600;
+}
+.pod-cancel {
+  border: 1px solid var(--color-border) !important;
+  border-radius: 4px;
+}
+.pod-confirm:disabled,
+.pod-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .zoom-btn {
   background: transparent;
   color: var(--color-text);

@@ -49,6 +49,26 @@ export const useUIStore = defineStore('ui', () => {
   // launch. Defaults to 'analysis' when nothing is stored.
   const viewMode = ref<'analysis' | 'compare'>(persisted.viewMode ?? 'analysis');
 
+  // --- POD-frame adjustment mode (not persisted) ---------------------------
+  // While active: the video stage is forced to the main (original) view, the
+  // POD marker on the timeline is draggable (seeking the video live), every
+  // other interaction is locked, and Confirm / Cancel are the only exits.
+  const podAdjustActive = ref(false);
+  const podAdjustFrame = ref<number | null>(null);
+  /** What the drag adjusts: the POD mark or the drill end. */
+  const podAdjustKind = ref<'pod' | 'drill_end'>('pod');
+
+  function enterPodAdjust(initialFrame: number, kind: 'pod' | 'drill_end' = 'pod'): void {
+    podAdjustActive.value = true;
+    podAdjustFrame.value = initialFrame;
+    podAdjustKind.value = kind;
+  }
+
+  function exitPodAdjust(): void {
+    podAdjustActive.value = false;
+    podAdjustFrame.value = null;
+  }
+
   function setMetricVisibility(metricId: string, visible: boolean): void {
     metricVisibility.value = { ...metricVisibility.value, [metricId]: visible };
   }
@@ -85,6 +105,11 @@ export const useUIStore = defineStore('ui', () => {
     selectedMetricId,
     selectedFlagId,
     viewMode,
+    podAdjustActive,
+    podAdjustFrame,
+    podAdjustKind,
+    enterPodAdjust,
+    exitPodAdjust,
     setMetricVisibility,
     isMetricVisible,
     toggleRightCollapsed,

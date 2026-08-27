@@ -49,6 +49,12 @@ class MetricContext:
     # that don't construct a real engine).
     pixel_mapper: Optional[Any] = None
 
+    # POD-orientation compute-family result (``src.orientation
+    # .compute_pod_data``): POD-establishment frame, per-member muzzle
+    # bearings/positions/sectors, and the two POD metric scores. ``None``
+    # when the family did not run. Consumed by the pod_orientation metrics.
+    pod_orientation: Optional[Dict[str, Any]] = None
+
     # Side-channel for metrics that produce flag records during
     # ``process(ctx)`` rather than only a final score. ``analysis.py``
     # drains this list when building the session payload. Each entry

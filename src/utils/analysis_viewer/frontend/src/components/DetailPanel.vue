@@ -1,5 +1,5 @@
 <template>
-  <div class="detail-panel">
+  <div class="detail-panel" :class="{ 'pod-adjust-locked': ui.podAdjustActive }">
     <div class="tabs">
       <button
         v-for="t in tabs"
@@ -38,6 +38,7 @@
               {{ session.itemById.get(selection.linkedItem)?.label ?? selection.linkedItem }}
             </button>
           </div>
+
         </template>
         <SessionOverview v-else />
       </section>
@@ -80,6 +81,7 @@ import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '@/stores/session';
 import { useUIStore } from '@/stores/ui';
 import { metricColor, SEVERITY_COLOR } from '@/theme/tokens';
+import type { MetricRecord } from '@/types/models';
 import {
   formatFrame,
   formatObjectRows,
@@ -131,7 +133,7 @@ const selection = computed<SelectionView | null>(() => {
       }
       return {
         title: f.title,
-        subtitle: `Flag · ${f.metric_id}`,
+        subtitle: `Flag · ${f.metric_id ?? 'session'}`,
         pillLabel: 'Flag',
         pillColor: SEVERITY_COLOR[f.severity] ?? SEVERITY_COLOR.warning,
         message: f.message,
@@ -176,14 +178,17 @@ const selection = computed<SelectionView | null>(() => {
     if (metric) {
       const rows: SummaryRow[] = [
         { label: 'Score', value: formatScore(metric.score) },
-        ...formatObjectRows(metric.summary as unknown as Record<string, unknown>),
+        ...metricSummaryRows(metric),
       ];
+      const uncertain = (metric as { uncertain?: boolean }).uncertain === true;
       return {
         title: metric.label,
         subtitle: `Metric · ${metric.metric_id}`,
-        pillLabel: 'Metric',
+        pillLabel: uncertain ? 'Uncertain' : 'Metric',
         pillColor: metricColor(metric.metric_id),
-        message: null,
+        message: uncertain
+          ? 'POD establishment was not identified automatically — the score is not computed.'
+          : null,
         rows,
         linkedItem: null,
         raw: metric,
@@ -193,6 +198,55 @@ const selection = computed<SelectionView | null>(() => {
 
   return null;
 });
+
+/** Curated rows for the POD metrics (their summaries carry big nested
+ *  structures the generic formatter would render as noise); every other
+ *  metric keeps the generic object rows. */
+function metricSummaryRows(metric: MetricRecord): SummaryRow[] {
+  if (metric.metric_id === 'pod_sector_coverage') {
+    const s = metric.summary;
+    const rows: SummaryRow[] = [];
+    if (s.pod_frame != null) {
+      rows.push({ label: 'POD frame', value: String(s.pod_frame) });
+      if (s.pod_time_sec != null) rows.push({ label: 'POD time', value: `${s.pod_time_sec.toFixed(2)}s` });
+      rows.push({ label: 'Source', value: s.source === 'instructor' ? 'Instructor-set' : 'Auto-detected' });
+    } else if (s.reason) {
+      rows.push({ label: 'Reason', value: s.reason });
+    }
+    if (s.sector_angle_degrees != null) {
+      rows.push({ label: 'Sector angle', value: `${s.sector_angle_degrees}°` });
+    }
+    for (const m of s.members ?? []) {
+      rows.push({
+        label: `Member ${m.id}`,
+        value: `muzzle ${m.bearing_deg > 0 ? '+' : ''}${Math.round(m.bearing_deg)}° · confidence ${m.confidence.toFixed(2)}`,
+      });
+    }
+    for (const ex of s.excluded_members ?? []) {
+      rows.push({ label: `Member ${ex.id}`, value: `excluded (${ex.reason})` });
+    }
+    return rows;
+  }
+  if (metric.metric_id === 'pod_mutual_facing') {
+    const s = metric.summary;
+    const rows: SummaryRow[] = [
+      { label: 'Team members', value: String(s.member_count) },
+      {
+        label: 'Violators',
+        value: s.violators.length ? s.violators.map((v) => `Member ${v}`).join(', ') : 'None',
+      },
+    ];
+    for (const p of s.pairs ?? []) {
+      const angle = p.angle_off_deg != null ? ` (${p.angle_off_deg}° off the direct line)` : '';
+      rows.push({
+        label: `Member ${p.from} → ${p.to}`,
+        value: `teammate ${p.to} in member ${p.from}'s sector of fire${angle}`,
+      });
+    }
+    return rows;
+  }
+  return formatObjectRows(metric.summary as unknown as Record<string, unknown>);
+}
 
 const pillLabel = computed(() => selection.value?.pillLabel ?? '');
 const pillColor = computed(() => selection.value?.pillColor ?? 'transparent');
@@ -229,6 +283,11 @@ watch(
 </script>
 
 <style scoped>
+.detail-panel.pod-adjust-locked {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
 .detail-panel {
   display: flex;
   flex-direction: column;
@@ -389,4 +448,5 @@ watch(
 .small {
   font-size: 0.85em;
 }
+
 </style>

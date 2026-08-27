@@ -21,3 +21,4 @@ from .room_coverage import RoomCoverage_Metric
 from .room_coverage_time import TotalRoomCoverageTime_Metric
 from .capture_pod import IdentifyAndCapturePods_Metric
 from .capture_pod_time import CapturePodTime_Metric
+from .pod_orientation import PodMutualFacing_Metric, PodSectorCoverage_Metric

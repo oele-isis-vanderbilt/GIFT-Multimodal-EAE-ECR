@@ -70,6 +70,8 @@ export type TimelineCallbacks = {
   onHover?: (payload: HoverPayload) => void;
   /** Fires after every redraw with the visible metrics' label positions. */
   onLayoutChanged?: (labels: MetricLabelInfo[]) => void;
+  /** POD-adjust mode: fires continuously while the POD marker is dragged. */
+  onPodDragPreview?: (frame: number) => void;
 };
 
 export type TimelineSceneData = {
@@ -81,6 +83,9 @@ export type TimelineSceneData = {
     end_uncertain: boolean;
   } | null;
   totalFrames: number;
+  /** Metric ids present in the session — rows are only laid out for these,
+   *  so legacy sessions without e.g. POD metrics don't render empty rows. */
+  metricIds?: string[];
 };
 
 const COLOR = {
@@ -105,6 +110,10 @@ const METRIC_LAYOUTS: Record<string, MetricLayoutSpec> = {
   entrance_hesitation: { mainRows: 2, hasLabels: true },
   total_time_of_entry: { mainRows: 1, hasLabels: false },
   move_along_wall: { mainRows: 1, hasLabels: false },
+  // Flags-only rows: no main content row (the POD mark itself lives on the
+  // main timeline), so their breadth is exactly their flag sub-rows.
+  pod_sector_coverage: { mainRows: 0, hasLabels: false },
+  pod_mutual_facing: { mainRows: 0, hasLabels: false },
 };
 
 const DEFAULT_METRIC_ORDER: string[] = [
@@ -112,6 +121,8 @@ const DEFAULT_METRIC_ORDER: string[] = [
   'entrance_hesitation',
   'total_time_of_entry',
   'move_along_wall',
+  'pod_sector_coverage',
+  'pod_mutual_facing',
 ];
 
 const METRIC_DISPLAY_NAMES: Record<string, string> = {
@@ -119,6 +130,8 @@ const METRIC_DISPLAY_NAMES: Record<string, string> = {
   entrance_hesitation: 'Hesitation',
   total_time_of_entry: 'Total Entry',
   move_along_wall: 'Wall',
+  pod_sector_coverage: 'POD',
+  pod_mutual_facing: 'POD Facing',
 };
 
 type MetricRenderPos = {
@@ -195,6 +208,7 @@ export class TimelineScene {
   private readonly entriesLayer = new Container();
   private readonly vectorsLayer = new Container();
   private readonly flagsLayer = new Container();
+  private readonly podLayer = new Container();
   private readonly drillMarkersLayer = new Container();
   // Drawn above the markers: a persistent ring around the selected event.
   private readonly selectionLayer = new Container();
@@ -229,6 +243,13 @@ export class TimelineScene {
   /** Pointer-down state for click-vs-pan discrimination on the empty track.
    *  A seek only fires on pointerup when total movement is ≤ TAP_TOLERANCE_PX. */
   private stagePointerDown: { x: number; y: number; frame: number } | null = null;
+  /** POD-frame adjustment mode: while set, the POD marker renders at
+   *  ``frame``, is the only interactive element, and drags horizontally
+   *  (reporting previews via onPodDragPreview). */
+  private podAdjust: { frame: number; kind: 'pod' | 'drill_end' } | null = null;
+  private podDragging = false;
+  /** Metric ids present in the session data; null = accept all (legacy). */
+  private presentMetricIds: Set<string> | null = null;
   /** flag_id → linked_item_id, rebuilt on each setData(). Used to gate
    *  pair_gap / wall_excursion bars: by design those bars are only
    *  rendered when the user has clicked their associated flag. */
@@ -272,6 +293,7 @@ export class TimelineScene {
     this.root.addChild(this.entriesLayer);
     this.root.addChild(this.vectorsLayer);
     this.root.addChild(this.flagsLayer);
+    this.root.addChild(this.podLayer);
     this.root.addChild(this.drillMarkersLayer);
     this.root.addChild(this.selectionLayer);
     this.root.addChild(this.playhead);
@@ -294,6 +316,7 @@ export class TimelineScene {
   destroy(): void {
     if (!this.initialized) return;
     this.initialized = false;
+    this.onWindowPodDragEnd();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     if (this.container) {
@@ -308,6 +331,7 @@ export class TimelineScene {
     this.flagsList = data.flags;
     this.drillWindow = data.drillWindow;
     this.totalFrames = Math.max(1, data.totalFrames);
+    this.presentMetricIds = data.metricIds ? new Set(data.metricIds) : null;
     // Rebuild the flag→item index used to gate segment-bar rendering.
     // Cheap (O(N_flags)); rebuilt only when the dataset changes.
     this.flagLinkedItem.clear();
@@ -466,8 +490,11 @@ export class TimelineScene {
 
   private computeLayout(): ComputedLayout {
     // Order: selected metric first, then others in default (data) order.
+    // Only metrics actually present in the session get a row.
     const visible = DEFAULT_METRIC_ORDER.filter(
-      (id) => this.metricVisibility[id] !== false,
+      (id) =>
+        this.metricVisibility[id] !== false &&
+        (this.presentMetricIds == null || this.presentMetricIds.has(id)),
     );
     const ordered =
       this.selectedMetricId && visible.includes(this.selectedMetricId)
@@ -497,6 +524,12 @@ export class TimelineScene {
       const flagsForMetric = flagsByMetric.get(metricId) ?? [];
       const flagRowAssignment = this.assignFlagRows(flagsForMetric);
       const flagRowCount = flagRowAssignment.rowCount;
+
+      // A flags-only metric with no flags at all has nothing to show —
+      // drop the row entirely instead of reserving empty breadth. (Flags are
+      // bucketed regardless of the visible range so row layout stays stable
+      // when switching between full-video and drill-window views.)
+      if (flagRowCount + spec.mainRows === 0) continue;
 
       const startY = cursor;
       const flagRowYs: number[] = [];
@@ -613,10 +646,102 @@ export class TimelineScene {
     this.drawEntries();
     this.drawVectors();
     this.drawFlags();
+    this.drawPodMarker();
     this.drawDrillMarkers();
     this.drawSelection();
     this.drawPlayhead();
     this.callbacks.onLayoutChanged?.(this.buildMetricLabels());
+  }
+
+  /** Enter/leave mark-adjust mode (POD or drill end) with a preview frame. */
+  setPodAdjust(state: { frame: number; kind?: 'pod' | 'drill_end' } | null): void {
+    const kind = state?.kind ?? 'pod';
+    const changed =
+      (state == null) !== (this.podAdjust == null) ||
+      (state != null && this.podAdjust != null &&
+        (state.frame !== this.podAdjust.frame || kind !== this.podAdjust.kind));
+    this.podAdjust = state == null ? null : { frame: state.frame, kind };
+    if (state == null) this.onWindowPodDragEnd();
+    if (changed) this.redraw();
+  }
+
+  /**
+   * The POD-establishment / drill-end markers on the main persistent
+   * timeline row (there is deliberately no duplicate in the POD metric row).
+   * Normal mode: a clickable purple diamond at the established POD frame.
+   * Adjust mode: rendered at the preview frame with a full-height guide line
+   * and horizontal-drag behavior (the only interactive element while
+   * adjusting) — for both the POD mark and the drill end.
+   */
+  private drawPodMarker(): void {
+    this.podLayer.removeChildren();
+    const adjusting = this.podAdjust != null;
+    const adjustKind = this.podAdjust?.kind ?? 'pod';
+    const item = this.items.find((it) => it.kind === 'pod_establishment');
+    const podColor = metricColorInt('pod_sector_coverage');
+
+    // --- adjust-mode marker (POD or drill end) ---------------------------
+    if (adjusting) {
+      const frame = this.podAdjust!.frame;
+      if (!this.inRange(frame)) return;
+      const color = adjustKind === 'drill_end' ? COLOR.drillStart : podColor;
+      // Both marks are adjusted on the main persistent timeline row — the
+      // full-height guide line still shows the frame against every band.
+      const y = this.layout.drillY;
+      const g = new Graphics();
+      g.rect(-0.75, 0, 1.5, this.layout.totalHeight).fill({ color, alpha: 0.5 });
+      g.circle(0, y, FLAG_RADIUS + 4).fill({ color, alpha: 0.25 });
+      const size = DRILL_DIAMOND + 3;
+      g.poly([0, y - size, size, y, 0, y + size, -size, y])
+        .fill({ color })
+        .stroke({ color: COLOR.outline, width: 1.5 });
+      g.x = this.edgeX(frame);
+      g.eventMode = 'static';
+      g.cursor = 'ew-resize';
+      g.hitArea = new Circle(0, y, FLAG_HIT_RADIUS + 6);
+      g.on('pointerdown', (ev: FederatedPointerEvent) => {
+        ev.stopPropagation();
+        this.startPodDrag();
+      });
+      this.podLayer.addChild(g);
+      return;
+    }
+
+    // --- static POD markers ---------------------------------------------
+    if (!item || !('frame' in item)) return;
+    const frame = (item as { frame: number }).frame;
+    if (!this.inRange(frame)) return;
+    const x = this.edgeX(frame);
+
+    // Persistent mark on the always-visible drill row (main timeline).
+    {
+      const y = this.layout.drillY;
+      const size = DRILL_DIAMOND;
+      const g = new Graphics();
+      const selected =
+        this.selectedItemId === item.item_id ||
+        this.selectedFlagId === 'pod_establishment_flag';
+      if (selected) {
+        // The selGeom registry keys one shape per id (used by the row
+        // marker), so this second location draws its own ring.
+        const rr = size + 3.5;
+        g.circle(0, y, rr).stroke({ color: 0x0b0e14, width: 4, alpha: 0.55 });
+        g.circle(0, y, rr).stroke({ color: 0xffffff, width: 2, alpha: 0.95 });
+      }
+      g.poly([0, y - size, size, y, 0, y + size, -size, y])
+        .fill({ color: podColor })
+        .stroke({ color: COLOR.outline, width: 1 });
+      g.x = x;
+      g.eventMode = 'static';
+      g.cursor = 'pointer';
+      g.hitArea = new Circle(0, y, FLAG_HIT_RADIUS);
+      this.attachClickAndHover(g, item.item_id, frame, 'item');
+      this.podLayer.addChild(g);
+    }
+
+    // No duplicate marker in the POD metric row — the persistent diamond on
+    // the main timeline is the single POD mark; the metric row carries only
+    // its flag badges (sector-coverage / facing).
   }
 
   // -- selection ring -------------------------------------------------------
@@ -674,6 +799,13 @@ export class TimelineScene {
 
   private xOf(frame: number): number {
     return (frame - this.rangeStart) * this.pixelsPerFrame;
+  }
+
+  /** Marker-centre x clamped inside the drawable area — a mark sitting at
+   *  the exact range edge (e.g. a drill end at the last frame) would
+   *  otherwise be half- or fully clipped by the canvas border. */
+  private edgeX(frame: number, margin: number = DRILL_DIAMOND + 2): number {
+    return clamp(this.xOf(frame), margin, Math.max(margin, this.app.screen.width - margin));
   }
 
   private inRange(frame: number): boolean {
@@ -943,14 +1075,25 @@ export class TimelineScene {
       DRILL_HIT_HALF * 2,
     );
 
+    // Clicking a drill diamond selects its synthesized info flag (so the
+    // detail panel, flag-list highlight, and selection ring all engage) and
+    // seeks — falling back to a plain hover label if the flag is absent.
+    const hasStartFlag = this.flagsList.some((f) => f.flag_id === 'drill_start_info');
+    const hasEndFlag = this.flagsList.some((f) => f.flag_id === 'drill_end_info');
+
     if (this.inRange(dw.start_frame)) {
       const start = this.makeDiamond(DRILL_DIAMOND, COLOR.drillStart, false);
       start.y = y;
-      start.x = this.xOf(dw.start_frame);
+      start.x = this.edgeX(dw.start_frame);
       start.eventMode = 'static';
       start.cursor = 'pointer';
       start.hitArea = drillHit;
-      this.attachClickAndHover(start, 'drill_start', dw.start_frame, 'drill');
+      if (hasStartFlag) {
+        this.attachClickAndHover(start, 'drill_start_info', dw.start_frame, 'flag');
+        this.regCircle('drill_start_info', this.edgeX(dw.start_frame), y, DRILL_DIAMOND + 1);
+      } else {
+        this.attachClickAndHover(start, 'drill_start', dw.start_frame, 'drill');
+      }
       this.drillMarkersLayer.addChild(start);
     }
     if (this.inRange(dw.end_frame)) {
@@ -960,11 +1103,16 @@ export class TimelineScene {
         dw.end_uncertain,
       );
       end.y = y;
-      end.x = this.xOf(dw.end_frame);
+      end.x = this.edgeX(dw.end_frame);
       end.eventMode = 'static';
       end.cursor = 'pointer';
       end.hitArea = drillHit;
-      this.attachClickAndHover(end, 'drill_end', dw.end_frame, 'drill');
+      if (hasEndFlag) {
+        this.attachClickAndHover(end, 'drill_end_info', dw.end_frame, 'flag');
+        this.regCircle('drill_end_info', this.edgeX(dw.end_frame), y, DRILL_DIAMOND + 1);
+      } else {
+        this.attachClickAndHover(end, 'drill_end', dw.end_frame, 'drill');
+      }
       this.drillMarkersLayer.addChild(end);
     }
   }
@@ -1000,6 +1148,8 @@ export class TimelineScene {
   ): void {
     target.on('pointerdown', (ev: FederatedPointerEvent) => {
       ev.stopPropagation();
+      // POD-adjust mode locks every interaction except the marker drag.
+      if (this.podAdjust != null) return;
       if (kind === 'item') {
         this.callbacks.onItemClicked?.(id, seekFrame);
       } else if (kind === 'flag') {
@@ -1026,6 +1176,17 @@ export class TimelineScene {
   };
 
   private onStagePointerDown = (ev: FederatedPointerEvent): void => {
+    if (this.podAdjust != null) {
+      // Adjust mode: remember the press so a tap (no drag) can place the
+      // marker at the tapped frame — much easier than grabbing a marker
+      // parked at the far edge of the timeline.
+      this.stagePointerDown = {
+        x: ev.client.x,
+        y: ev.client.y,
+        frame: this.rangeStart + Math.round(ev.global.x / this.pixelsPerFrame),
+      };
+      return;
+    }
     const localX = ev.global.x;
     const frame = this.rangeStart + Math.round(localX / this.pixelsPerFrame);
     // Defer the seek until pointerup so a drag-to-pan doesn't trigger one.
@@ -1034,7 +1195,78 @@ export class TimelineScene {
     this.stagePointerDown = { x: ev.client.x, y: ev.client.y, frame };
   };
 
+  /**
+   * POD-marker drag uses NATIVE window listeners, not Pixi stage events:
+   * Pixi v8's stage `pointermove` is hit-tested (it only fires over drawn
+   * display objects), so a drag would stall over empty track areas and stop
+   * entirely outside the canvas. Window-level tracking is continuous.
+   */
+  private startPodDrag(): void {
+    if (this.podAdjust == null || this.podDragging) return;
+    this.podDragging = true;
+    window.addEventListener('pointermove', this.onWindowPodDragMove);
+    window.addEventListener('pointerup', this.onWindowPodDragEnd, { once: true });
+    window.addEventListener('pointercancel', this.onWindowPodDragEnd, { once: true });
+  }
+
+  private clampAdjustFrame(rawFrame: number): number {
+    // The drill end can never sit at/before the drill start.
+    const minFrame = this.podAdjust?.kind === 'drill_end' && this.drillWindow
+      ? Math.max(1, this.drillWindow.start_frame + 1)
+      : 1;
+    return clamp(
+      rawFrame,
+      Math.max(minFrame, Math.floor(this.rangeStart)),
+      Math.min(this.totalFrames, Math.ceil(this.rangeEnd)),
+    );
+  }
+
+  private setAdjustPreview(frame: number): void {
+    if (this.podAdjust == null || frame === this.podAdjust.frame) return;
+    this.podAdjust = { frame, kind: this.podAdjust.kind };
+    this.redraw();
+    this.callbacks.onPodDragPreview?.(frame);
+  }
+
+  /** Horizontally center the view on a frame (no-op when nothing scrolls). */
+  centerOnFrame(frame: number): void {
+    const c = this.container;
+    if (!c) return;
+    const x = (frame - this.rangeStart) * this.pixelsPerFrame;
+    c.scrollLeft = Math.max(0, x - c.clientWidth / 2);
+  }
+
+  private onWindowPodDragMove = (ev: PointerEvent): void => {
+    if (!this.podDragging || this.podAdjust == null) return;
+    const rect = this.app.canvas.getBoundingClientRect();
+    // autoDensity keeps CSS px == stage px, so canvas-local x maps directly.
+    const localX = ev.clientX - rect.left;
+    this.setAdjustPreview(
+      this.clampAdjustFrame(this.rangeStart + Math.round(localX / this.pixelsPerFrame)),
+    );
+  };
+
+  private onWindowPodDragEnd = (): void => {
+    this.podDragging = false;
+    window.removeEventListener('pointermove', this.onWindowPodDragMove);
+  };
+
   private onStagePointerUp = (ev: FederatedPointerEvent): void => {
+    if (this.podDragging) {
+      return;
+    }
+    if (this.podAdjust != null) {
+      const down = this.stagePointerDown;
+      this.stagePointerDown = null;
+      if (down) {
+        const dx = ev.client.x - down.x;
+        const dy = ev.client.y - down.y;
+        if (Math.hypot(dx, dy) <= TAP_TOLERANCE_PX) {
+          this.setAdjustPreview(this.clampAdjustFrame(down.frame));
+        }
+      }
+      return;
+    }
     const down = this.stagePointerDown;
     this.stagePointerDown = null;
     if (!down) return;

@@ -72,8 +72,50 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const url = `${sidecarBaseUrl()}${path}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${res.statusText} — ${bodyText || url}`);
+  }
+  return (await res.json()) as T;
+}
+
 export function fetchSession(jsonPath: string): Promise<AnalysisSession> {
   return getJson<AnalysisSession>(`/session?path=${encodeURIComponent(jsonPath)}`);
+}
+
+/** Move a flag into the instructor bin. Returns the re-merged session. */
+export function deleteFlag(sessionPath: string, flagId: string): Promise<AnalysisSession> {
+  return postJson<AnalysisSession>('/flags/delete', { path: sessionPath, flag_id: flagId });
+}
+
+/** Restore a binned flag. Returns the re-merged session. */
+export function restoreFlag(sessionPath: string, flagId: string): Promise<AnalysisSession> {
+  return postJson<AnalysisSession>('/flags/restore', { path: sessionPath, flag_id: flagId });
+}
+
+/**
+ * Set (frame) or reset (null) the instructor POD-establishment frame.
+ * The backend recomputes members/sectors/scores/flags from run caches and
+ * returns the re-merged session.
+ */
+export function setPodFrame(sessionPath: string, frame: number | null): Promise<AnalysisSession> {
+  return postJson<AnalysisSession>('/pod/frame', { path: sessionPath, frame });
+}
+
+/**
+ * Set (frame) or reset (null) the instructor drill end. The backend re-runs
+ * the window-dependent metrics (wall flags included) and POD detection from
+ * run caches and returns the re-merged session.
+ */
+export function setDrillEnd(sessionPath: string, frame: number | null): Promise<AnalysisSession> {
+  return postJson<AnalysisSession>('/drill/end', { path: sessionPath, frame });
 }
 
 export function fetchHealth(): Promise<{ ok: boolean; service: string }> {
