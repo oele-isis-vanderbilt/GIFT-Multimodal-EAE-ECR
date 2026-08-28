@@ -512,6 +512,117 @@ class ProcessingEngine:
         self.inferencer = None
         free_torch_memory(getattr(self, "device", None))
 
+    def _transcribe_audio_prepass(self, config: Dict[str, Any]) -> Optional[str]:
+        """Static-video audio prepass (``streaming_transcription: false``).
+
+        Extract the WHOLE audio in one ffmpeg call, optionally denoise it,
+        transcribe it once, write the standard ``_Transcription.json`` sidecar
+        (plus the ``_denoised.wav`` artifact), and release the ASR model —
+        all BEFORE the vision loop starts, so nothing audio-related runs at
+        peak load. Returns the sidecar path, or None on any failure (the
+        caller falls back to the streaming path).
+        """
+        import time as _time
+        t0 = _time.monotonic()
+        try:
+            from .utils.asr_session import build_session
+            from .utils.audio import extract_audio_to_wav
+
+            tmp_wav = os.path.join(
+                self.output_directory, f"{self.video_basename}_prepass_audio.wav"
+            )
+            ok = extract_audio_to_wav(
+                config["video_path"], tmp_wav, sample_rate=16000, channels=1
+            )
+            if not ok:
+                return None
+            try:
+                import soundfile as sf
+                audio, _sr = sf.read(tmp_wav, dtype="float32", always_2d=False)
+            finally:
+                try:
+                    os.remove(tmp_wav)
+                except OSError:
+                    pass
+            audio = np.asarray(audio, dtype=np.float32)
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            if audio.size == 0:
+                return None
+
+            denoise_info = None
+            if bool(config.get("enable_denoise", False)):
+                try:
+                    from .utils.denoise import DenoiseSession
+                    dn = DenoiseSession(
+                        model_name="dns48",
+                        dry=float(config.get("denoise_dry", 0.5)),
+                        device=config.get("denoise_device")
+                        or config.get("transcription_device", "cpu"),
+                    )
+                    try:
+                        den = dn.feed(audio)
+                        tail = dn.flush()
+                        parts = [p for p in (den, tail)
+                                 if p is not None and getattr(p, "size", 0) > 0]
+                        if parts:
+                            audio = np.concatenate(parts)
+                            wav_name = f"{self.video_basename}_denoised.wav"
+                            import soundfile as sf
+                            sf.write(
+                                os.path.join(self.output_directory, wav_name),
+                                audio, 16000, subtype="PCM_16",
+                            )
+                            denoise_info = {
+                                "model": "dns48",
+                                "dry": float(config.get("denoise_dry", 0.5)),
+                                "audio_artifact": wav_name,
+                                "start_sec": 0.0,
+                            }
+                    finally:
+                        try:
+                            dn.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    logging.warning(
+                        "Denoise prepass failed; transcribing raw audio.",
+                        exc_info=True,
+                    )
+
+            session = build_session(config)
+            try:
+                segments = session.transcribe_audio(audio, offset_sec=0.0)
+            finally:
+                session.close()
+            free_torch_memory(config.get("transcription_device", "cpu"))
+
+            sidecar = save_transcription_sidecar(
+                output_dir=self.output_directory,
+                video_basename=self.video_basename,
+                segments=segments,
+                model=str(config.get("asr_backend", "parakeet")),
+                language=config.get("transcription_language", "en"),
+                aligned=True,
+                audio_window={
+                    "start_sec": 0.0,
+                    "end_sec": round(audio.size / 16000.0, 3),
+                },
+                denoise=denoise_info,
+            )
+            path = sidecar if isinstance(sidecar, str) else os.path.join(
+                self.output_directory, f"{self.video_basename}_Transcription.json"
+            )
+            logging.info(
+                "Audio prepass complete: %d segments from %.1fs of audio in "
+                "%.1fs — ASR model released before the vision loop.",
+                len(segments), audio.size / 16000.0, _time.monotonic() - t0,
+            )
+            return path
+        except Exception:
+            logging.exception("Audio prepass failed.")
+            return None
+
     def mt_initialize(self, messages, vmeta_paths, output_path):
         logging.debug(f"Received initialization message with {len(vmeta_paths)} vmeta files.")
 
@@ -716,6 +827,15 @@ class ProcessingEngine:
         assert config is not None  # narrowed for the closure below
         drill_window_enabled = bool(config.get("drill_window_enabled", True))
         enable_transcription = bool(config.get("enable_transcription", False))
+        # streaming_transcription (default True): transcribe in parallel with
+        # the frame loop — the live-stream-shaped path and the main objective.
+        # False = static-video mode: ALL audio work happens up front (one
+        # ffmpeg extraction, optional denoise, one transcription pass) and the
+        # ASR model is released before the vision loop starts. On memory-
+        # constrained machines this avoids the peak-load contention the
+        # parallel path is exposed to; the drill end is then decided instantly
+        # from the stored transcript when the first entry is detected.
+        streaming_asr = bool(config.get("streaming_transcription", True))
 
         def _transcribe_full_audio() -> None:
             """One-shot Parakeet transcription of the whole audio.
@@ -759,11 +879,16 @@ class ProcessingEngine:
 
         transcription_thread: Optional[threading.Thread] = None
         if enable_transcription and not drill_window_enabled:
-            transcription_thread = threading.Thread(
-                target=_transcribe_full_audio, name="transcription", daemon=False,
-            )
-            transcription_thread.start()
-            logging.info("Started full-audio transcription thread (drill window off).")
+            if streaming_asr:
+                transcription_thread = threading.Thread(
+                    target=_transcribe_full_audio, name="transcription", daemon=False,
+                )
+                transcription_thread.start()
+                logging.info("Started full-audio transcription thread (drill window off).")
+            else:
+                logging.info("Static-video mode: full-audio transcription running "
+                             "before the frame loop (drill window off).")
+                _transcribe_full_audio()
 
         tracker_output: List[dict] = []
         all_map_points: List[list] = []
@@ -795,7 +920,42 @@ class ProcessingEngine:
         end_locator_result: Dict[str, Any] = {}
         end_locator_done = threading.Event()
 
+        # Static-video mode: run the whole audio pipeline now, before the
+        # vision loop. On failure fall back to the streaming path (the
+        # prepass sidecar stays None, so _locate_drill_end streams as usual).
+        prepass_sidecar: Optional[str] = None
+        if run_locator and not streaming_asr:
+            prepass_sidecar = self._transcribe_audio_prepass(config)
+            if prepass_sidecar is None:
+                logging.error(
+                    "Audio prepass failed — falling back to streaming "
+                    "transcription during the frame loop."
+                )
+
         def _locate_drill_end(entry_frame: int) -> None:
+            if prepass_sidecar is not None:
+                # Static-video mode: the full transcript already exists —
+                # just decide the window (batch latest-passing rule).
+                try:
+                    window = compute_drill_window(
+                        transcription_path=prepass_sidecar,
+                        drill_start_frame=entry_frame,
+                        total_frames=frame_total,
+                        frame_rate=fps_cfg,
+                        config=config,
+                    )
+                    end_locator_result["window"] = window
+                    logging.info(
+                        "Prepass drill-end: end_frame=%s reason=%s.",
+                        window.end_frame, window.decision_reason,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Drill-end location failed; processing continues to video end."
+                    )
+                finally:
+                    end_locator_done.set()
+                return
             # Loads the ASR model once and transcribes only up to ~one
             # confirmation chunk past the drill end (never to EOF), then writes
             # the standard Transcription.json sidecar from the accumulated
@@ -1164,8 +1324,10 @@ class ProcessingEngine:
         elif drill_window_enabled:
             # Transcription off, or no entry was ever detected → no
             # transcript-derived end; window falls back to whole-video.
+            # (In static-video mode a prepass transcript may exist even
+            # though no live entry fired — use it.)
             drill_window = compute_drill_window(
-                transcription_path=None,
+                transcription_path=prepass_sidecar,
                 drill_start_frame=find_drill_start_frame(tracker_output),
                 total_frames=processed_frames,
                 frame_rate=fps,

@@ -61,6 +61,7 @@ audio through — the pipeline never breaks.
 | Key | Default | Meaning |
 |---|---|---|
 | `enable_transcription` | true | Run ASR + drill-end detection |
+| `streaming_transcription` | true | `true` = stream ASR in parallel with the frame loop (live-stream path, stops at the confirmed end). `false` = static-video prepass: extract + denoise + transcribe the whole audio BEFORE the vision loop and release the ASR model first — for testing on memory-constrained machines; the drill end is then decided from the stored transcript (batch latest-passing rule) at first entry |
 | `drill_window_enabled` | true | Auto-detect drill start/end and trim to it |
 | `stop_at_drill_end` | true | Stop the frame loop at the located end |
 | `asr_backend` | `parakeet` | ASR engine |

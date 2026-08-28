@@ -105,6 +105,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # audio + transcription (advanced defaults)
     "preserve_audio": True,
     "enable_transcription": True,
+    "streaming_transcription": True,
     "transcription_device": "cpu",
     "enable_denoise": False,
     "denoise_device": "cpu",
@@ -168,6 +169,7 @@ COMMENTS: Dict[str, str] = {
     # audio + transcription
     "preserve_audio": "When true, camera-view annotated videos keep the original audio track (muxed via ffmpeg). Map-view videos remain silent. Harmless if the source has no audio.",
     "enable_transcription": "When true (default), NeMo Parakeet-TDT transcribes the drill audio and saves a _Transcription.json sidecar with word-level timestamps. The first run downloads the Parakeet checkpoint (~2.4 GB) to the HuggingFace cache; subsequent runs reuse it.",
+    "streaming_transcription": "When true (default), transcription streams in parallel with the frame loop and stops the moment the drill end is confirmed — the live-stream-shaped path. Set false for static-video testing on memory-constrained machines (e.g. laptops): ALL audio work (one ffmpeg extraction, optional denoise, one transcription pass) runs BEFORE the vision loop and the ASR model is released first, avoiding peak-load contention; the drill end is then decided instantly from the stored transcript (batch latest-passing rule) once the first entry is detected.",
     "transcription_device": "Compute device for the Parakeet ASR: cpu (default), cuda, or mps. cpu keeps the ASR fully parallel with the MPS pose loop (recommended); mps is ~15x faster per pass but shares the GPU with pose. Falls back to cpu when the requested device is unavailable.",
     "enable_denoise": "When true, runs Facebook Denoiser (dns48 model, streaming DemucsStreamer) on the audio before ASR as an optional speech-enhancement pass. Improves ASR accuracy on noisy field audio. Only the transcription consumes the denoised audio — saved annotated videos always keep the original track. First use downloads a ~128 MB checkpoint to ~/.cache/torch/hub/checkpoints/.",
     "denoise_device": "Compute device for FB Denoiser. cpu or cuda only — Demucs's internal conv1d exceeds the MPS 65536-output-channel kernel limit; if mps is set the denoiser auto-falls-back to cpu with a warning. Independent of transcription_device. Ignored when enable_denoise is false.",
@@ -1345,6 +1347,14 @@ class ConfigBuilderWindow(QMainWindow):
         self.adv_widgets["enable_transcription"] = chk_txn
         self._add_adv_row("enable_transcription", chk_txn)
 
+        chk_stream = QCheckBox("Stream transcription in parallel with the frame loop (off = audio prepass for static videos)")
+        chk_stream.stateChanged.connect(
+            lambda s: self._set_adv_value("streaming_transcription", bool(s == Qt.Checked))
+        )
+        chk_stream.clicked.connect(lambda: self.show_description("streaming_transcription"))
+        self.adv_widgets["streaming_transcription"] = chk_stream
+        self._add_adv_row("streaming_transcription", chk_stream)
+
         txn_device = QComboBox()
         txn_device.addItems(["cpu", "cuda"])
         txn_device.currentTextChanged.connect(
@@ -1578,7 +1588,8 @@ class ConfigBuilderWindow(QMainWindow):
                 sp.blockSignals(False)
 
         # --- Audio & Transcription ---
-        for key in ("preserve_audio", "enable_transcription", "enable_denoise"):
+        for key in ("preserve_audio", "enable_transcription",
+                    "streaming_transcription", "enable_denoise"):
             chk = self.adv_widgets.get(key)
             if isinstance(chk, QCheckBox):
                 chk.blockSignals(True)

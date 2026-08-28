@@ -761,6 +761,13 @@ with a truncated transcript: check that reason field, re-run with nothing else
 open (one video at a time), or set the drill end manually in the Analysis
 Viewer — all window-dependent metrics recompute from caches.
 
+For static-video testing on such machines, set `"streaming_transcription":
+false` in the room config: the whole audio pipeline (one ffmpeg extraction,
+optional denoise, one transcription pass) then runs BEFORE the vision loop and
+the ASR model is released first, so nothing audio-related competes at peak
+load. Streaming (`true`, the default) remains the live-stream-shaped path and
+the main objective — see [TRANSCRIPTION.md](TRANSCRIPTION.md).
+
 #### Examples
 
 ```bash
