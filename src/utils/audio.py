@@ -64,6 +64,39 @@ def has_audio_stream(video_path: str) -> bool:
     return result.returncode == 0 and "audio" in result.stdout
 
 
+def probe_audio_duration_sec(video_path: str) -> Optional[float]:
+    """Duration (seconds) of ``video_path``'s first audio stream, or None.
+
+    Tries the audio stream's own duration, then the container duration (some
+    muxers only stamp the latter). Returns None on any failure — missing
+    ffprobe, unreadable file, no audio stream — callers must treat None as
+    "unknown", never as zero.
+    """
+    if not video_path or not os.path.exists(video_path):
+        return None
+    ffprobe = _find_binary("ffprobe")
+    if ffprobe is None:
+        return None
+    for entries in ("stream=duration", "format=duration"):
+        cmd = [ffprobe, "-v", "error"]
+        if entries.startswith("stream="):
+            cmd += ["-select_streams", "a:0"]
+        cmd += ["-show_entries", entries, "-of", "csv=p=0", video_path]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logging.debug("ffprobe duration probe failed for %s: %s", video_path, exc)
+            return None
+        if result.returncode == 0:
+            try:
+                val = float((result.stdout or "").strip().splitlines()[0])
+                if val > 0:
+                    return val
+            except (ValueError, IndexError):
+                pass
+    return None
+
+
 def mux_audio_from_source(
     silent_video: str,
     audio_source: str,

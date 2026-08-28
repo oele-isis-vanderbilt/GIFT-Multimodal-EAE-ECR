@@ -109,6 +109,16 @@ def locate_drill_end_streaming(
 
     if window is None:
         window = detector.finalize()
+        # A mid-stream extraction failure (not a real EOF) truncated the
+        # transcript — say so in the sidecar so a wrong/missing drill end is
+        # diagnosable from the artifacts alone.
+        fail_at = getattr(src, "failed_at_sec", None)
+        if fail_at is not None:
+            total = getattr(src, "audio_duration_sec", None)
+            window.decision_reason += (
+                f"; audio_read_failed_at_{fail_at:.1f}s"
+                + (f"_of_{total:.1f}s_audio" if total else "")
+            )
 
     return StreamingResult(
         window=window,

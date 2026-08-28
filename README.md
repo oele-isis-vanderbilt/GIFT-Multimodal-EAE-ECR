@@ -741,6 +741,26 @@ python run_engine_local.py <path/to/session.vmeta.xml> [options]
 - Processing may take some time; a progress bar is displayed during execution.
 - Outputs (videos/logs/metrics) are written to `--output_path` (default: `output/`).
 
+#### Constrained machines (laptops) and the streaming ASR
+
+On memory-constrained machines (e.g. a MacBook Air), the streaming drill-end
+transcription runs at the moment of peak load — pose models on GPU, the ~2.4 GB
+Parakeet model, and the optional denoiser all live at once — and the per-chunk
+ffmpeg audio extraction can fail under that pressure. Symptom: the transcript
+stops after the first ~8 s chunk, the drill end is never matched, and
+window-dependent scores (e.g. `STAY_ALONG_WALL`) shift because the window fell
+back to the video end. Note the vision metrics themselves are deterministic
+across machines — only this audio path is load-sensitive.
+
+The engine defends against it: the reader probes the true audio duration up
+front (so a mid-stream failure is never mistaken for end-of-audio), retries a
+failed extraction once, logs an ERROR (visible without `--verbose`), and
+records the truncation in `{base}_DrillWindow.json`'s `decision_reason`
+(e.g. `...; audio_read_failed_at_25.1s_of_45.0s_audio`). If a run still ends
+with a truncated transcript: check that reason field, re-run with nothing else
+open (one video at a time), or set the drill end manually in the Analysis
+Viewer — all window-dependent metrics recompute from caches.
+
 #### Examples
 
 ```bash

@@ -17,15 +17,19 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from typing import Optional
 
 import numpy as np
 
-from .audio import extract_audio_to_wav
+from .audio import extract_audio_to_wav, probe_audio_duration_sec
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
+# One retry after a failed extraction that is provably NOT past end-of-audio
+# (a transient subprocess failure under load must not truncate transcription).
+EXTRACT_RETRY_DELAY_SEC = 1.0
 
 
 class AudioChunkSource:
@@ -53,12 +57,45 @@ class FileAudioChunkSource(AudioChunkSource):
         self.source_path = source_path
         self.sample_rate = int(sample_rate)
         self._tmpdir = tempfile.mkdtemp(prefix="asr_chunks_")
+        # Known length of the audio stream (None = unknowable). Makes
+        # "requested window past end-of-audio" decidable, so an extraction
+        # FAILURE mid-stream is never mistaken for a clean EOF.
+        self.audio_duration_sec = probe_audio_duration_sec(source_path)
+        # Set when reads were abandoned by a mid-stream failure (not EOF) —
+        # callers surface this in their artifacts (e.g. DrillWindow reason).
+        self.failed_at_sec: Optional[float] = None
 
     def read(self, start_sec: float, dur_sec: float) -> Optional[np.ndarray]:
         start_sec = max(0.0, float(start_sec))
         dur_sec = float(dur_sec)
         if dur_sec <= 0:
             return None
+        known = self.audio_duration_sec
+        if known is not None and start_sec >= known - 0.05:
+            return None  # genuinely past end-of-audio
+        # With a known duration, a failed/near-empty extraction inside the
+        # stream is a transient failure (subprocess spawn/timeout under load):
+        # retry once before giving up loudly. With an unknown duration we keep
+        # the legacy single attempt — near-empty output at the true end of
+        # audio is normal there, and retry/noise on every natural EOF is worse.
+        attempts = 2 if known is not None else 1
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(EXTRACT_RETRY_DELAY_SEC)
+            data = self._extract_once(start_sec, dur_sec)
+            if data is not None and data.size >= int(0.05 * self.sample_rate):
+                return data
+        if known is not None:
+            self.failed_at_sec = start_sec
+            logger.error(
+                "Audio chunk extraction failed twice at %.2fs although the "
+                "audio stream runs to %.2fs — treating as end-of-stream; "
+                "transcription (and drill-end detection) will be truncated.",
+                start_sec, known,
+            )
+        return None
+
+    def _extract_once(self, start_sec: float, dur_sec: float) -> Optional[np.ndarray]:
         out_wav = os.path.join(self._tmpdir, f"chunk_{start_sec:.3f}_{dur_sec:.3f}.wav")
         ok = extract_audio_to_wav(
             self.source_path,
@@ -77,10 +114,6 @@ class FileAudioChunkSource(AudioChunkSource):
                 os.remove(out_wav)
             except OSError:
                 pass
-        # ffmpeg happily returns an empty/near-empty file when the requested
-        # window is past the end of the audio stream — treat that as EOF.
-        if data is None or data.size < int(0.05 * self.sample_rate):
-            return None
         return data
 
     def close(self) -> None:
