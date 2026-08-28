@@ -154,7 +154,7 @@ feeds the next:
    Bundle the mapper outputs + scoring knobs into a ready-to-use `config.json`.
 4. **Run the engine** — `run_engine_local.py` (local) / `run_engine.py` (server) — see [Usage](#usage).
 5. **Analysis Viewer** — `python -m src.utils.analysis_viewer`
-   View and compare the results.
+   View and compare the results, and make instructor adjustments (POD mark, drill end, flag bin).
 
 ### Node.js is auto-installed
 
