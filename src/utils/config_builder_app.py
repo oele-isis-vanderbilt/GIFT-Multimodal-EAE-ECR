@@ -93,6 +93,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # coverage (main defaults)
     "coverage_time_threshold": 3.0,
 
+    # pod orientation / sector-of-fire (main defaults)
+    "pod_sector_angle_degrees": 20.0,
+
     # gaze keypoints (advanced defaults)
     "gaze_keypoint_map": {"NOSE": 0, "LEYE": 1, "REYE": 2, "LEAR": 3, "REAR": 4},
 
@@ -156,6 +159,8 @@ COMMENTS: Dict[str, str] = {
     "pod_groups": "Per-POD grouping label (A/B). Group PODs that belong to the same side/segment of the room to allow assignment to people moving either left or right from the entry",
 
     "coverage_time_threshold": "Seconds of sustained coverage needed for full score in TOTAL_FLOOR_COVERAGE_TIME.",
+
+    "pod_sector_angle_degrees": "Full apex angle (degrees) of each member's sector-of-fire triangle for the POD orientation metrics (POD_SECTOR_COVERAGE / POD_MUTUAL_FACING). The only POD-orientation knob — pause detection and orientation estimation are automatic.",
 
     "gaze_keypoint_map": "Keypoint indices (Halpe26) used to compute gaze direction (nose/eyes/ears).",
     "frame_rate": "(Optional) Override FPS used in comparisons; normally set automatically from video during processing.",
@@ -979,6 +984,12 @@ class ConfigBuilderWindow(QMainWindow):
         knobs_layout.addWidget(QLabel("seconds"), row, 2)
         row += 1
 
+        self.spin_pod_sector_angle = self._mk_dspin("pod_sector_angle_degrees", 1.0, 179.0, 1.0, "deg")
+        knobs_layout.addWidget(self._mk_label_btn("POD sector-of-fire angle", "pod_sector_angle_degrees"), row, 0)
+        knobs_layout.addWidget(self.spin_pod_sector_angle, row, 1)
+        knobs_layout.addWidget(QLabel("degrees"), row, 2)
+        row += 1
+
         # STAY_ALONG_WALL no longer exposes a knob: the band is per-person,
         # derived from each entrant's own shoulder-to-elbow length at runtime.
 
@@ -1245,6 +1256,7 @@ class ConfigBuilderWindow(QMainWindow):
         self.spin_pod_radius.setValue(float(self.model.data.get("pod_working_radius", 40.0)))
         self.spin_pod_capture.setValue(float(self.model.data.get("pod_capture_threshold_sec", 0.1)))
         self.spin_coverage_time.setValue(float(self.model.data.get("coverage_time_threshold", 3.0)))
+        self.spin_pod_sector_angle.setValue(float(self.model.data.get("pod_sector_angle_degrees", 20.0)))
 
         self.refresh_paths()
         self._rebuild_pod_time_limits()
